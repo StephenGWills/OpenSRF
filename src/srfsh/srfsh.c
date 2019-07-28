@@ -37,6 +37,7 @@ static void get_misc( ArgParser* parser );
 #define SRFSH_PORT 5222
 #define COMMAND_BUFSIZE 4096
 
+static char* tz = NULL;
 
 /* shell prompt */
 static const char* prompt = "srfsh# ";
@@ -95,6 +96,7 @@ static void close_all_sessions( void );
 
 static int recv_timeout = 120;
 static int is_from_script = 0;
+static int no_bang = 0;
 
 static osrfHash* server_hash = NULL;
 
@@ -103,6 +105,7 @@ int main( int argc, char* argv[] ) {
 	/* --------------------------------------------- */
 	/* see if they have a .srfsh.xml in their home directory */
 	char* home = getenv("HOME");
+	tz = getenv("TZ");
 	int l = strlen(home) + 36;
 	char fbuf[l];
 	snprintf(fbuf, sizeof(fbuf), "%s/.srfsh.xml", home);
@@ -120,26 +123,42 @@ int main( int argc, char* argv[] ) {
 	}
 
 	if(argc > 1) {
-		/* for now.. the first arg is used as a script file for processing */
 		int f;
-		if( (f = open(argv[1], O_RDONLY)) == -1 ) {
-			osrfLogError( OSRF_LOG_MARK, "Unable to open file %s for reading, exiting...", argv[1]);
-			return -1;
-		}
+		int i;
+		for (i = 1; i < argc; i++) {
 
-		if(dup2(f, STDIN_FILENO) == -1) {
-			osrfLogError( OSRF_LOG_MARK, "Unable to duplicate STDIN, exiting...");
-			return -1;
-		}
+			if( !strcmp( argv[i], "--safe" ) ) {
+				no_bang = 1;
+				continue;
+			}
 
-		close(f);
-		is_from_script = 1;
+			/* for now.. the first unrecognized arg is used as a script file for processing */
+			if (is_from_script) continue;
+
+			if( (f = open(argv[i], O_RDONLY)) == -1 ) {
+				osrfLogError( OSRF_LOG_MARK, "Unable to open file %s for reading, exiting...", argv[i]);
+				return -1;
+			}
+
+			if(dup2(f, STDIN_FILENO) == -1) {
+				osrfLogError( OSRF_LOG_MARK, "Unable to duplicate STDIN, exiting...");
+				return -1;
+			}
+
+			close(f);
+			is_from_script = 1;
+		}
 	}
-		
+
+	// if stdin is not a tty, assume that we're running
+	// a script and don't want to record history
+	if (!isatty(fileno(stdin))) is_from_script = 1;
+
 	/* --------------------------------------------- */
-	load_history();
+	if (!is_from_script) load_history();
 
 	client = osrfSystemGetTransportClient();
+	osrfAppSessionSetIngress("srfsh");
 	
 	// Disable special treatment for tabs by readline
 	// (by default they invoke command completion, which
@@ -179,7 +198,7 @@ int main( int argc, char* argv[] ) {
 		}
 
 		process_request( cmd );
-		if( request && *cmd ) {
+		if( !is_from_script && request && *cmd ) {
 			add_history(request);
 		}
 
@@ -363,8 +382,10 @@ static int process_request( const char* request ) {
 		ret_val = handle_close( cmd_array );
 
 	else if ( request[0] == '!') {
-		system( request + 1 );
-		ret_val = 1;
+		if (!no_bang) {
+			(void) (system( request + 1 )+1);
+			ret_val = 1;
+		}
 	}
 
 	osrfStringArrayFree( cmd_array );
@@ -779,6 +800,8 @@ int send_request( const char* server,
 		session_is_temporary = 1;                     // just for this request
 	}
 
+	if (tz) osrf_app_session_set_tz(session,tz);
+
 	double start = get_timestamp_millis();
 
 	int req_id = osrfAppSessionSendRequest( session, params, method, 1 );
@@ -903,7 +926,7 @@ int send_request( const char* server,
 	fprintf(less, "Request Time in seconds: %.6f\n", end - start );
 	fputs("------------------------------------\n", less);
 
-	pclose(less);
+	if(!is_from_script) pclose(less);
 
 	osrf_app_session_request_finish( session, req_id );
 
@@ -972,8 +995,12 @@ static int print_help( void ) {
 			"---------------------------------------------------------------------------------\n"
 			"General commands:\n"
 			"---------------------------------------------------------------------------------\n"
-			"help                   - Display this message\n"
-			"!<command> [args]      - Forks and runs the given command in the shell\n"
+			"help                   - Display this message\n",
+			stdout );
+	if (!no_bang) fputs(
+			"!<command> [args]      - Forks and runs the given command in the shell\n",
+			stdout );
+	fputs(
 		/*
 			"time			- Prints the current time\n"
 			"time <timestamp>	- Formats seconds since epoch into readable format\n"

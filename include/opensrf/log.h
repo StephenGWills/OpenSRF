@@ -75,6 +75,8 @@ extern "C" {
 
 void osrfLogInit( int type, const char* appname, int maxlevel );
 
+void osrfLogSetLogTag( const char* logtag );
+
 void osrfLogSetSyslogFacility( int facility );
 
 void osrfLogSetSyslogActFacility( int facility );
@@ -107,9 +109,9 @@ void osrfLogCleanup( void );
 
 void osrfLogClearXid( void );
 
-void osrfLogSetXid(char* xid);
+void osrfLogSetXid(const char* xid);
 
-void osrfLogForceXid(char* xid);
+void osrfLogForceXid(const char* xid);
 
 void osrfLogMkXid( void );
 

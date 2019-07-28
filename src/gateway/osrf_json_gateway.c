@@ -5,6 +5,7 @@
 #include <opensrf/osrf_json.h>
 #include <opensrf/osrf_json_xml.h>
 #include <opensrf/osrf_legacy_json.h>
+#include <opensrf/string_array.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -29,6 +30,7 @@ char* osrf_json_default_locale = "en-US";
 char* osrf_json_gateway_config_file = NULL;
 int bootstrapped = 0;
 int numserved = 0;
+osrfStringArray* allowedOrigins = NULL;
 
 static const char* osrf_json_gateway_set_default_locale(cmd_parms *parms,
 		void *config, const char *arg) {
@@ -86,6 +88,9 @@ static void osrf_json_gateway_child_init(apr_pool_t *p, server_rec *s) {
 		return;
 	}
 
+	allowedOrigins = osrfNewStringArray(4);
+	osrfConfigGetValueList(NULL, allowedOrigins, "/cross_origin/origin");
+
 	bootstrapped = 1;
 	osrfLogInfo(OSRF_LOG_MARK, "Bootstrapping gateway child for requests");
 
@@ -100,6 +105,7 @@ static int osrf_json_gateway_method_handler (request_rec *r) {
 	/* make sure we're needed first thing*/
 	if (strcmp(r->handler, MODULE_NAME )) return DECLINED;
 
+	crossOriginHeaders(r, allowedOrigins);
 
 	osrf_json_gateway_dir_config* dir_conf =
 		ap_get_module_config(r->per_dir_config, &osrf_json_gateway_module);
@@ -129,6 +135,7 @@ static int osrf_json_gateway_method_handler (request_rec *r) {
 	}
 
 	osrfLogSetAppname("osrf_json_gw");
+	osrfAppSessionSetIngress("gateway-v1");
 
 	char* osrf_locale   = NULL;
 	char* param_locale  = NULL;  /* locale for this call */
@@ -286,20 +293,39 @@ static int osrf_json_gateway_method_handler (request_rec *r) {
 		const char* authtoken = apr_table_get(r->headers_in, "X-OILS-Authtoken");
 		if(!authtoken) authtoken = "";
 		growing_buffer* act = buffer_init(128);
+#ifdef APACHE_MIN_24
+		buffer_fadd(act, "[%s] [%s] [%s] %s %s", r->connection->client_ip,
+			authtoken, osrf_locale, service, method );
+#else
 		buffer_fadd(act, "[%s] [%s] [%s] %s %s", r->connection->remote_ip,
 			authtoken, osrf_locale, service, method );
+#endif
+
 		const char* str; int i = 0;
-		while( (str = osrfStringArrayGetString(mparams, i++)) ) {
-			if( i == 1 ) {
-				OSRF_BUFFER_ADD(act, " ");
-				OSRF_BUFFER_ADD(act, str);
-			} else {
-				OSRF_BUFFER_ADD(act, ", ");
-				OSRF_BUFFER_ADD(act, str);
+		int redact_params = 0;
+		while( (str = osrfStringArrayGetString(log_protect_arr, i++)) ) {
+			//osrfLogInternal(OSRF_LOG_MARK, "Checking for log protection [%s]", str);
+			if(!strncmp(method, str, strlen(str))) {
+				redact_params = 1;
+				break;
+			}
+		}
+		if(redact_params) {
+			OSRF_BUFFER_ADD(act, " **PARAMS REDACTED**");
+		} else {
+			i = 0;
+			while( (str = osrfStringArrayGetString(mparams, i++)) ) {
+				if( i == 1 ) {
+					OSRF_BUFFER_ADD(act, " ");
+					OSRF_BUFFER_ADD(act, str);
+				} else {
+					OSRF_BUFFER_ADD(act, ", ");
+					OSRF_BUFFER_ADD(act, str);
+				}
 			}
 		}
 
-		osrfLogActivity( OSRF_LOG_MARK, act->buf );
+		osrfLogActivity( OSRF_LOG_MARK, "%s", act->buf );
 		buffer_free(act);
 		/* ----------------------------------------------------------------- */
 

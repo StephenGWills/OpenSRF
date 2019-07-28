@@ -1,8 +1,6 @@
 package OpenSRF;
-
+use warnings;
 use strict;
-use vars qw/$AUTOLOAD/;
-
 use Error;
 require UNIVERSAL::require;
 
@@ -14,50 +12,13 @@ OpenSRF - Top level class for OpenSRF perl modules.
 
 =head1 VERSION
 
-Version 2.0.0
+Version 3.0-dev
 
 =cut
 
-our $VERSION = "2.00";
+our $VERSION = "3.000_000";
 
 =head1 METHODS
-
-=head2 AUTOLOAD
-
-Traps methods calls for methods that have not been defined so they
-don't propagate up the class hierarchy.
-
-=cut
-
-sub AUTOLOAD {
-	my $self = shift;
-	my $type = ref($self) || $self;
-	my $name = $AUTOLOAD;
-	my $otype = ref $self;
-
-	my ($package, $filename, $line) = caller;
-	my ($package1, $filename1, $line1) = caller(1);
-	my ($package2, $filename2, $line2) = caller(2);
-	my ($package3, $filename3, $line3) = caller(3);
-	my ($package4, $filename4, $line4) = caller(4);
-	my ($package5, $filename5, $line5) = caller(5);
-	$name =~ s/.*://;   # strip fully-qualified portion
-	warn <<"	WARN";
-****
-** ${name}() isn't there.  Please create me somewhere (like in $type)!
-** Error at $package ($filename), line $line
-** Call Stack (5 deep):
-** 	$package1 ($filename1), line $line1
-** 	$package2 ($filename2), line $line2
-** 	$package3 ($filename3), line $line3
-** 	$package4 ($filename4), line $line4
-** 	$package5 ($filename5), line $line5
-** Object type was $otype
-****
-	WARN
-}
-
-
 
 =head2 alert_abstract
 
@@ -80,5 +41,22 @@ Returns the scalar value of its caller.
 =cut
 
 sub class { return scalar(caller); }
+
+=head2 OSRF_APACHE_REQUEST_OBJ
+
+Gets and sets the Apache request object when running inside mod_perl.
+This allows other parts of OpenSRF to investigate the state of the
+remote connection, such as whether the client has disconnected, and
+react accordingly.
+
+=cut
+
+our $_OARO;
+sub OSRF_APACHE_REQUEST_OBJ {
+	my $self = shift;
+	my $a = shift;
+	$_OARO = $a if $a;
+	return $_OARO;
+}
 
 1;

@@ -5,6 +5,7 @@ use OpenSRF::DomainObject::oilsResponse qw/:status/;
 use OpenSRF::Utils::Logger qw/:level/;
 use warnings; use strict;
 use OpenSRF::EX qw/:try/;
+use POSIX qw/tzset/;
 
 OpenSRF::Utils::JSON->register_class_hint(hint => 'osrfMessage', name => 'OpenSRF::DomainObject::oilsMessage', type => 'hash');
 
@@ -17,6 +18,7 @@ sub new {
 	my $self = shift;
 	my $class = ref($self) || $self;
 	my %args = @_;
+	$args{tz} = $ENV{TZ};
 	return bless \%args => $class;
 }
 
@@ -102,6 +104,42 @@ sub sender_locale {
 	return $self->{locale};
 }
 
+=head2 OpenSRF::DomainObject::oilsMessage->sender_tz( [$tz] );
+
+=over 4
+
+Sets or gets the current message tz.  Useful for telling the
+server how you see the world.
+
+=back
+
+=cut
+
+sub sender_tz {
+	my $self = shift;
+	my $val = shift;
+	$self->{tz} = $val if (defined $val);
+	return $self->{tz};
+}
+
+=head2 OpenSRF::DomainObject::oilsMessage->sender_ingress( [$ingress] );
+
+=over 4
+
+Sets or gets the current message ingress.  Useful for telling the
+server how you entered the opensrf network.
+
+=back
+
+=cut
+
+sub sender_ingress {
+	my $self = shift;
+	my $val = shift;
+	$self->{ingress} = $val if $val;
+	return $self->{ingress};
+}
+
 =head2 OpenSRF::DomainObject::oilsMessage->threadTrace( [$new_threadTrace] );
 
 =over 4
@@ -179,29 +217,35 @@ sub handler {
 	my $session = shift;
 
 	my $mtype = $self->type;
+	my $tz = $self->sender_tz || '';
 	my $locale = $self->sender_locale || '';
+	my $ingress = $self->sender_ingress || '';
 	my $api_level = $self->api_level || 1;
 	my $tT = $self->threadTrace;
 
-    $log->debug("Message locale is $locale", DEBUG);
+    $log->debug("Message locale is $locale; ingress = $ingress; tz = $tz", DEBUG);
 
 	$session->last_message_type($mtype);
 	$session->last_message_api_level($api_level);
 	$session->last_threadTrace($tT);
 	$session->session_locale($locale);
 
-	$log->debug(" Received api_level => [$api_level], MType => [$mtype], ".
-			"from [".$session->remote_id."], threadTrace[".$self->threadTrace."]");
+	$log->debug(sub{return " Received api_level => [$api_level], MType => [$mtype], ".
+			"from [".$session->remote_id."], threadTrace[".$self->threadTrace."]" });
 
 	my $val;
 	if ( $session->endpoint == $session->SERVER() ) {
 		$val = $self->do_server( $session, $mtype, $api_level, $tT );
 
 	} elsif ($session->endpoint == $session->CLIENT()) {
+		$tz = undef; # Client should not adopt the TZ of the server
 		$val = $self->do_client( $session, $mtype, $api_level, $tT );
 	}
 
 	if( $val ) {
+		local $ENV{TZ} = $tz || $ENV{TZ}; # automatic revert at the end of this scope
+		delete $ENV{TZ} unless $ENV{TZ}; # avoid UTC fall-back
+		tzset();
 		return OpenSRF::Application->handler($session, $self->payload);
 	} else {
 		$log->debug("Request was handled internally", DEBUG);
@@ -276,7 +320,7 @@ sub do_client {
 
 		if ($self->payload->statusCode == STATUS_OK) {
 			$session->state($session->CONNECTED);
-			$log->debug("We connected successfully to ".$session->app);
+			$log->debug(sub{return "We connected successfully to ".$session->app });
 			return 0;
 		}
 
@@ -328,7 +372,7 @@ sub do_client {
 		}
 	}
 
-	$log->debug("oilsMessage passing to Application: " . $self->type." : ".$session->remote_id );
+	$log->debug(sub{return "oilsMessage passing to Application: " . $self->type." : ".$session->remote_id });
 
 	return 1;
 

@@ -30,9 +30,8 @@ export PID                      = @localstatedir@/run/opensrf
 export SOCK                     = @localstatedir@/lock/opensrf
 export LOG                      = @localstatedir@/log/opensrf
 export srcdir                   = @srcdir@
+export PERL_BASE                = @PERL_BASE@
 opensrfincludedir               = @includedir@/opensrf
-
-ACLOCAL_AMFLAGS = -I m4
 
 AM_CFLAGS = $(DEF_CFLAGS)
 
@@ -55,7 +54,6 @@ EXAMPLES_FILES = @srcdir@/examples/fieldmapper2cdbi.xsl \
 				 @srcdir@/examples/math_bench.pl \
 				 @srcdir@/examples/math_client.py \
 				 @srcdir@/examples/multisession-test.pl \
-				 @srcdir@/examples/register.pl \
 				 @srcdir@/examples/srfsh_config.xsd \
 				 @srcdir@/examples/math_xul_client/math \
 				 @srcdir@/examples/math_xul_client/install.js
@@ -116,12 +114,6 @@ opensrfinclude_HEADERS = $(OSRFINC)/log.h \
 endif
 
 SUBDIRS = src tests
-
-jserver:
-	$(MAKE) -s -C src jserver
-
-jserver-install:
-	$(MAKE) -s -C src jserver-install
 
 distclean-local:
 	rm -rf ./autom4te.cache

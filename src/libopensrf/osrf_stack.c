@@ -149,6 +149,10 @@ struct osrf_app_session_struct* osrf_stack_transport_handler( transport_message*
 			}
 		}
 
+		// grab the ingress value from the first message.
+		// they will all be the same
+		if (i == 0) osrfAppSessionSetIngress(arr[i]->sender_ingress);
+
 		if( session->type == OSRF_SESSION_CLIENT )
 			_do_client( session, arr[i] );
 		else
@@ -269,6 +273,11 @@ static void _do_server( osrfAppSession* session, osrfMessage* msg ) {
 	if(session == NULL || msg == NULL) return;
 
 	osrfLogDebug( OSRF_LOG_MARK, "Server received message of type %d", msg->m_type );
+
+        osrf_app_session_set_tz(session, msg->sender_tz);
+        osrf_app_session_set_locale(session, msg->sender_locale);
+
+	osrfLogDebug( OSRF_LOG_MARK, "Message has locale %s and tz %s", session->session_locale, session->session_tz );
 
 	switch( msg->m_type ) {
 

@@ -135,7 +135,7 @@ vim:et:ts=2:sw=2:
         <keepalive>3</keepalive>
         <stateless>1</stateless>
         <language>c</language>
-        <implementation>osrf_math.so</implementation>
+        <implementation>libosrf_math.so</implementation>
         <unix_config>
           <unix_sock>opensrf.math_unix.sock</unix_sock>
           <unix_pid>opensrf.math_unix.pid</unix_pid>
@@ -152,7 +152,7 @@ vim:et:ts=2:sw=2:
         <keepalive>3</keepalive>
         <stateless>1</stateless>
         <language>c</language>
-        <implementation>osrf_dbmath.so</implementation>
+        <implementation>libosrf_dbmath.so</implementation>
         <unix_config>
           <max_requests>1000</max_requests>
           <unix_log>opensrf.dbmath_unix.log</unix_log>
@@ -164,6 +164,24 @@ vim:et:ts=2:sw=2:
           <max_spare_children>5</max_spare_children>
         </unix_config>
       </opensrf.dbmath>
+
+      <opensrf.cslow>
+        <keepalive>3</keepalive>
+        <stateless>1</stateless>
+        <language>c</language>
+        <implementation>libosrf_cslow.so</implementation>
+        <unix_config>
+          <max_requests>1000</max_requests>
+          <unix_log>opensrf.cslow_unix.log</unix_log>
+          <unix_sock>opensrf.cslow_unix.sock</unix_sock>
+          <unix_pid>opensrf.cslow_unix.pid</unix_pid>
+          <min_children>5</min_children>
+          <max_children>15</max_children>
+          <min_spare_children>2</min_spare_children>
+          <max_spare_children>5</max_spare_children>
+          <max_backlog_queue>10</max_backlog_queue>
+        </unix_config>
+      </opensrf.cslow>
 
       <opensrf.settings>
         <keepalive>1</keepalive>
@@ -182,6 +200,64 @@ vim:et:ts=2:sw=2:
           <max_spare_children>5</max_spare_children>
         </unix_config>
       </opensrf.settings>
+
+      <opensrf.slooooooow>
+        <keepalive>1</keepalive>
+        <stateless>1</stateless>
+        <language>perl</language>
+        <implementation>OpenSRF::Application::Slooooooow</implementation>
+        <max_requests>100</max_requests>
+        <unix_config>
+          <unix_sock>opensrf.slooooooow_unix.sock</unix_sock>
+          <unix_pid>opensrf.slooooooow_unix.pid</unix_pid>
+          <max_requests>1000</max_requests>
+          <unix_log>opensrf.slooooooow_unix.log</unix_log>
+          <min_children>2</min_children>
+          <max_children>5</max_children>
+          <min_spare_children>1</min_spare_children>
+          <max_spare_children>2</max_spare_children>
+          <max_backlog_queue>10</max_backlog_queue>
+        </unix_config>
+      </opensrf.slooooooow>
+
+      <opensrf.validator>
+        <keepalive>1</keepalive>
+        <stateless>1</stateless>
+        <language>perl</language>
+        <implementation>OpenSRF::Application::Validator</implementation>
+        <max_requests>17</max_requests>
+        <unix_config>
+          <unix_sock>opensrf.validator_unix.sock</unix_sock>
+          <unix_pid>opensrf.validator_unix.pid</unix_pid>
+          <max_requests>1000</max_requests>
+          <unix_log>opensrf.validator_unix.log</unix_log>
+          <min_children>5</min_children>
+          <max_children>15</max_children>
+          <min_spare_children>3</min_spare_children>
+          <max_spare_children>5</max_spare_children>
+        </unix_config>
+        <app_settings>
+          <validators>
+            <emailaddress>
+              <modules>
+                <a_regex>
+                    <implementation>OpenSRF::Application::Validator::EmailAddress::Regex</implementation>
+                </a_regex>
+                <b_dns>
+                    <implementation>OpenSRF::Application::Validator::EmailAddress::DNS</implementation>
+                    <check_mx_a>1</check_mx_a>
+                    <!-- Change this to a 1 to check for IPV6 records as well as IPV4 -->
+                    <check_aaaa>0</check_aaaa>
+                    <!-- Uncomment this to specify a resolve.conf-like config file for DNS lookups -->
+                    <!--<config_file>/path/to/file</config_file>-->
+                    <!-- A set of IPs to ignore - Useful when your DNS provider intercepts NXDOMAIN (say, OpenDNS) -->
+                    <ignore_ips>127.0.0.1,67.215.65.132</ignore_ips>
+                </b_dns>
+              </modules>
+            </emailaddress>
+          </validators>
+        </app_settings>
+      </opensrf.validator>
     </apps>
   </default>
 
@@ -194,7 +270,7 @@ vim:et:ts=2:sw=2:
         On Linux, the output of the following command is authoritative:
         $ perl -MNet::Domain -e 'print Net::Domain::hostfqdn() . "\n";'
 
-        To use 'localhost' instead, run osrf_ctl.sh with the -l flag
+        To use 'localhost' instead, run osrf_control with the 'localhost' flag
       -->
       <!-- List all of the apps this server will be running -->
       <activeapps>
@@ -202,6 +278,9 @@ vim:et:ts=2:sw=2:
         <appname>opensrf.settings</appname>
         <appname>opensrf.math</appname>
         <appname>opensrf.dbmath</appname>
+        <appname>opensrf.validator</appname>
+        <appname>opensrf.slooooooow</appname>
+        <appname>opensrf.cslow</appname>
       </activeapps>
 
       <apps>

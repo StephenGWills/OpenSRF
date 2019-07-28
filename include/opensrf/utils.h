@@ -280,6 +280,7 @@ extern "C" {
 int init_proc_title( int argc, char* argv[] );
 int set_proc_title( const char* format, ... );
 
+int daemonizeWithCallback( void (*)(pid_t, int), int );
 int daemonize( void );
 
 void* safe_malloc(int size);
@@ -375,6 +376,12 @@ char* md5sum( const char* text, ... );
 	returns 0 if the descriptor is OK
 */
 int osrfUtilsCheckFileDescriptor( int fd );
+
+/*
+	Returns the approximate additional length of
+	a string after XML escaping <, >, &, and ".
+*/
+size_t osrfXmlEscapingLength ( const char* str );
 
 #ifdef __cplusplus
 }

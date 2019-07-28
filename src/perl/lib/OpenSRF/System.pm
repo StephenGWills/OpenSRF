@@ -16,8 +16,8 @@ use OpenSRF::Server;
 
 my $bootstrap_config_file;
 sub import {
-	my( $self, $config ) = @_;
-	$bootstrap_config_file = $config;
+    my( $self, $config ) = @_;
+    $bootstrap_config_file = $config;
 }
 
 $| = 1;
@@ -25,48 +25,62 @@ $| = 1;
 sub DESTROY {}
 
 sub load_bootstrap_config {
-	return if OpenSRF::Utils::Config->current;
+    return if OpenSRF::Utils::Config->current;
 
     die "Please provide a bootstrap config file to OpenSRF::System\n"
         unless $bootstrap_config_file;
 
-	OpenSRF::Utils::Config->load(config_file => $bootstrap_config_file);
-	OpenSRF::Utils::JSON->register_class_hint(name => "OpenSRF::Application", hint => "method", type => "hash");
-	OpenSRF::Transport->message_envelope("OpenSRF::Transport::SlimJabber::MessageWrapper");
-	OpenSRF::Transport::PeerHandle->set_peer_client("OpenSRF::Transport::SlimJabber::PeerConnection");
-	OpenSRF::Application->server_class('client');
+    OpenSRF::Utils::Config->load(config_file => $bootstrap_config_file);
+    OpenSRF::Utils::JSON->register_class_hint(name => "OpenSRF::Application", hint => "method", type => "hash", strip => ['session']);
+    OpenSRF::Transport->message_envelope("OpenSRF::Transport::SlimJabber::MessageWrapper");
+    OpenSRF::Transport::PeerHandle->set_peer_client("OpenSRF::Transport::SlimJabber::PeerConnection");
+    OpenSRF::Application->server_class('client');
+    # Read in a shared portion of the config file
+    # for later use in log parameter redaction
+    $OpenSRF::Application::shared_conf = OpenSRF::Utils::Config->load(
+        'config_file' => OpenSRF::Utils::Config->current->FILE,
+        'nocache' => 1,
+        'force' => 1,
+        'base_path' => '/config/shared'
+    );
 }
 
 # ----------------------------------------------
 # Bootstraps a single client connection.  
 # named params are 'config_file' and 'client_name'
 sub bootstrap_client {
-	my $self = shift;
+    my $self = shift;
 
-	my $con = OpenSRF::Transport::PeerHandle->retrieve;
-    return if $con and $con->tcp_connected;
+    my $con = OpenSRF::Transport::PeerHandle->retrieve;
+    if ($con) {
+        # flush the socket to force a non-blocking read
+        # and to clear out any unanticipated leftovers
+        eval { $con->flush_socket };
+        return if $con->connected;
+        $con->reset;
+    }
 
-	my %params = @_;
+    my %params = @_;
 
-	$bootstrap_config_file = 
-		$params{config_file} || $bootstrap_config_file;
+    $bootstrap_config_file = 
+        $params{config_file} || $bootstrap_config_file;
 
-	my $app = $params{client_name} || "client";
+    my $app = $params{client_name} || "client";
 
-	load_bootstrap_config();
-	OpenSRF::Utils::Logger::set_config();
-	OpenSRF::Transport::PeerHandle->construct($app);
+    load_bootstrap_config();
+    OpenSRF::Utils::Logger::set_config();
+    OpenSRF::Transport::PeerHandle->construct($app);
 }
 
 sub connected {
-	if (my $con = OpenSRF::Transport::PeerHandle->retrieve) {
-		return 1 if $con->tcp_connected;
-	}
-	return 0;
+    if (my $con = OpenSRF::Transport::PeerHandle->retrieve) {
+        return 1 if $con->connected;
+    }
+    return 0;
 }
 
 sub run_service {
-    my($class, $service) = @_;
+    my($class, $service, $pid_dir) = @_;
 
     $0 = "OpenSRF Listener [$service]";
 
@@ -99,6 +113,7 @@ sub run_service {
         min_children =>  $getval->(unix_config => 'min_children') || 1,
         min_spare_children =>  $getval->(unix_config => 'min_spare_children'),
         max_spare_children =>  $getval->(unix_config => 'max_spare_children'),
+        max_backlog_queue =>  $getval->(unix_config => 'max_backlog_queue'),
         stderr_log_path => $stderr_path
     );
 

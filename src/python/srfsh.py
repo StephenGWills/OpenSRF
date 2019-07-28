@@ -410,8 +410,9 @@ class Srfsh(object):
     def do_connect(self):
         ''' Connects this instance to the OpenSRF network. '''
 
+        osrf.ses.Session.ingress('srfsh')
         file = os.path.join(self.get_var('HOME'), ".srfsh.xml")
-        osrf.system.System.connect(config_file=file, config_context='srfsh')
+        osrf.system.System.net_connect(config_file=file, config_context='srfsh')
 
     def add_command(self, **kwargs):
         ''' Adds a new command to the supported srfsh commands.

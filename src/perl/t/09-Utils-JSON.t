@@ -1,6 +1,8 @@
 #!perl -T
+use strict;
+use warnings;
 
-use Test::More tests => 49;
+use Test::More tests => 54;
 
 use OpenSRF::Utils::JSON;
 
@@ -19,6 +21,7 @@ is ($OpenSRF::Utils::JSON::JSON_PAYLOAD_KEY, '__p');
 # start with the simplest bits possible
 is (OpenSRF::Utils::JSON::true, 1);
 is (OpenSRF::Utils::JSON->true, 1);
+is (OpenSRF::Utils::JSON::false, 0);
 is (OpenSRF::Utils::JSON->false, 0);
 
 
@@ -26,14 +29,17 @@ is (OpenSRF::Utils::JSON->false, 0);
 # register_class_hint
 my $testmap =  { hints   => { osrfException =>
                               { hint => 'osrfException',
+                                strip => ['session'],
                                 name => 'OpenSRF::DomainObject::oilsException' }
                             },
-                 classes => { OpenSRF::DomainObject::oilsException =>
+                 classes => { 'OpenSRF::DomainObject::oilsException' =>
                               { hint => 'osrfException',
+                                strip => ['session'],
                                 name => 'OpenSRF::DomainObject::oilsException' }
                             }
                };
 OpenSRF::Utils::JSON->register_class_hint( hint => 'osrfException',
+                                           strip => ['session'],
                                            name => 'OpenSRF::DomainObject::oilsException');
 is_deeply (\%OpenSRF::Utils::JSON::_class_map, $testmap);
 
@@ -76,8 +82,12 @@ is (OpenSRF::Utils::JSON->perl2JSONObject(),      undef, "Returns argument unles
 is (OpenSRF::Utils::JSON->perl2JSONObject(3),     3,     "Returns argument unless it's a ref");
 is (OpenSRF::Utils::JSON->perl2JSONObject('foo'), 'foo', "Returns argument unless it's a ref");
 
-is (ref OpenSRF::Utils::JSON->true, 'JSON::XS::Boolean');
-is (OpenSRF::Utils::JSON->perl2JSONObject(OpenSRF::Utils::JSON->true), '1', "Returns argument if it's a JSON::XS::Boolean");
+ok (JSON::XS::is_bool(OpenSRF::Utils::JSON->true), 'OpenSRF::Utils::JSON->true is a Boolean according to JSON::XS');
+ok (JSON::XS::is_bool(OpenSRF::Utils::JSON->false), 'OpenSRF::Utils::JSON->false is a Boolean according to JSON::XS');
+ok (!JSON::XS::is_bool 1, "1 is not a boolean according to JSON::XS");
+ok (!JSON::XS::is_bool 0, "0 is not a boolean according to JSON::XS");
+is (OpenSRF::Utils::JSON->perl2JSONObject(OpenSRF::Utils::JSON->true), '1', "Returns argument if it's a Boolean according to JSON::XS");
+is (OpenSRF::Utils::JSON->perl2JSONObject(OpenSRF::Utils::JSON->false), '0', "Returns argument if it's a Boolean according to JSON::XS");
 
 my $hashref = { foo => 'bar' };
 is (UNIVERSAL::isa($hashref,'HASH'), 1);
@@ -92,7 +102,7 @@ is (UNIVERSAL::isa($coderef,'CODE'), 1);   # code doesn't stop me from doing it
 is_deeply (OpenSRF::Utils::JSON->perl2JSONObject($coderef),
            { __c => 'CODE', __p => undef }, "Passing in coderef");
 
-my $fakeobj = bless { foo => 'bar' }, 'OpenSRF::DomainObject::oilsException';
+my $fakeobj = bless { foo => 'bar', session => 'hidden session stuff' }, 'OpenSRF::DomainObject::oilsException';
 is (UNIVERSAL::isa($fakeobj,'HASH'), 1);
 my $jsonobj = OpenSRF::Utils::JSON->perl2JSONObject($fakeobj);
 is_deeply ($jsonobj, { __c => 'osrfException', __p => { foo => 'bar' } },
@@ -102,7 +112,11 @@ is_deeply ($jsonobj, { __c => 'osrfException', __p => { foo => 'bar' } },
 #
 # perl2JSON
 my $jsonstr = OpenSRF::Utils::JSON->perl2JSON($fakeobj);
-is ($jsonstr, '{"__c":"osrfException","__p":{"foo":"bar"}}');
+ok (
+    ($jsonstr eq '{"__c":"osrfException","__p":{"foo":"bar"}}' ||
+     $jsonstr eq '{"__p":{"foo":"bar"},"__c":"osrfException"}'),
+    'JSON corresponds to Perl object (though hash key order by vary)'
+);
 
 
 #
@@ -114,13 +128,13 @@ is (OpenSRF::Utils::JSON->JSONObject2Perl($coderef), $coderef, "Returns argument
 
 is_deeply (OpenSRF::Utils::JSON->JSONObject2Perl([11, 12]), [11, 12], "Arrayrefs get reconstructed as themselves");
 is_deeply (OpenSRF::Utils::JSON->JSONObject2Perl([11, OpenSRF::Utils::JSON->true, 12]), [11, OpenSRF::Utils::JSON->true, 12],
-           "Even when they contain JSON::XS::Booleans; those just don't get recursed upon");
-           # note: [11, 1, 12] doesn't work here, even though you can do math on J:X:Booleans
+           "Even when they contain JSON::XS Booleans; those just don't get recursed upon");
+           # note: [11, 1, 12] doesn't work here, even though you can do math on J::X Booleans
 
 is_deeply (OpenSRF::Utils::JSON->JSONObject2Perl($hashref), { foo => 'bar' }, "Hashrefs without the class flag also get turned into themselves");
 is_deeply (OpenSRF::Utils::JSON->JSONObject2Perl({ foo => OpenSRF::Utils::JSON->true, bar => 'baz' }), 
            { foo => OpenSRF::Utils::JSON->true, bar => 'baz'},
-           "Even when they contain JSON::XS::Booleans; those just don't get recursed upon");
+           "Even when they contain JSON::XS Booleans; those just don't get recursed upon");
 
 my $vivobj = OpenSRF::Utils::JSON->JSONObject2Perl($jsonobj);
 is (ref $vivobj, 'OpenSRF::DomainObject::oilsException');

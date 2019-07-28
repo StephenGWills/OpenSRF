@@ -113,8 +113,7 @@ int init_proc_title( int argc, char* argv[] ) {
 		provide values to be formatted and inserted into the format string.
 	@return Length of the resulting string (or what the length would be if the
 		receiving buffer were big enough to hold it), or -1 in case of an encoding
-		error.  Note: because some older versions of snprintf() don't work correctly,
-		this function may return -1 if the string is truncated for lack of space.
+		error.
 
 	Formats a string as directed, and uses it to replace the name of the
 	currently running executable.  This replacement string is what will
@@ -130,7 +129,11 @@ int init_proc_title( int argc, char* argv[] ) {
 int set_proc_title( const char* format, ... ) {
 	VA_LIST_TO_STRING(format);
 	osrf_clearbuf( *(global_argv), global_argv_size);
-	return snprintf( *(global_argv), global_argv_size, VA_BUF );
+	(void) strncpy( *(global_argv), VA_BUF, global_argv_size - 1 );
+	if (strlen(VA_BUF) >= global_argv_size) {
+		*(global_argv)[global_argv_size - 1] = '\0';
+	}
+	return (strlen(VA_BUF) > strlen(*(global_argv))) ? strlen(VA_BUF) : strlen(*(global_argv));
 }
 
 /**
@@ -645,12 +648,14 @@ char* uescape( const char* string, int size, int full_escape ) {
 
 /**
 	@brief Become a proper daemon.
+	@param callback Ptr to a function.  From parent, called with child PID as first argument, and the next argument to *this* function as the second argument.  From child, called with -1, -1 (yes pid_t is signed)
+	@param callback_arg An integer argument passed as the second argument to the callback function from the parent process post-fork()
 	@return 0 if successful, or -1 if not.
 
 	Call fork().  The parent exits.  The child moves to the root directory, detaches from
 	the terminal, and redirects the standard streams (stdin, stdout, stderr) to /dev/null.
 */
-int daemonize( void ) {
+int daemonizeWithCallback( void (*callback)(pid_t, int), int callback_arg ) {
 	pid_t f = fork();
 
 	if (f == -1) {
@@ -659,25 +664,41 @@ int daemonize( void ) {
 
 	} else if (f == 0) { // We're in the child now...
 		
+		if( callback )
+			callback( -1, -1 );
+
 		// Change directories.  Otherwise whatever directory
 		// we're in couldn't be deleted until the program
 		// terminated -- possibly causing some inconvenience.
-		chdir( "/" );
+		(void) (chdir( "/" )+1);
 
 		/* create new session */
 		setsid();
 
 		// Now that we're no longer attached to a terminal,
 		// we don't want any traffic on the standard streams
-		freopen( "/dev/null", "r", stdin );
-		freopen( "/dev/null", "w", stdout );
-		freopen( "/dev/null", "w", stderr );
+		(void) (freopen( "/dev/null", "r", stdin )+1);
+		(void) (freopen( "/dev/null", "w", stdout )+1);
+		(void) (freopen( "/dev/null", "w", stderr )+1);
 		
 		return 0;
 
 	} else { // We're in the parent...
+		if( callback )
+			callback( f, callback_arg );
+
 		_exit(0);
 	}
+}
+
+/**
+	@brief Become a proper daemon.
+	@return 0 if successful, or -1 if not.
+
+	See daemonizeWithCallback() for details.
+*/
+int daemonize( void ) {
+	return daemonizeWithCallback( NULL, 0 );
 }
 
 
@@ -761,5 +782,28 @@ int osrfUtilsCheckFileDescriptor( int fd ) {
 	}
 
 	return 0;
+}
+
+size_t osrfXmlEscapingLength ( const char* str ) {
+	int extra = 0;
+	const char* s;
+	for (s = str; *s; ++s) {
+		switch (*s) {
+			case '>':
+			case '<':
+				extra += 3;
+				break;
+			case '&':
+				extra += 4;
+				break;
+			case '"':
+				extra += 11;
+				break;
+			default:
+				break;
+		}
+	}
+
+	return extra;
 }
 

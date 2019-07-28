@@ -46,7 +46,7 @@ sub new {
 				1
 			);
 		#print "Creating connection ".$self->{sessions}->[-1]->session_id." ...\n";
-		$log->debug("Creating connection ".$self->{sessions}->[-1]->session_id." ...");
+		$log->debug(sub{return "Creating connection ".$self->{sessions}->[-1]->session_id." ..." });
 	}
 
 	return $self;
@@ -200,7 +200,7 @@ sub request {
 			  params => [@params]
 			};
 
-		$log->debug("Making request [$method] ".$self->running."...");
+		$log->debug(sub{return "Making request [$method] ".$self->running."..." });
 
 		return $req;
 	} elsif (!$self->adaptive) {
@@ -215,23 +215,41 @@ sub request {
 sub session_wait {
 	my $self = shift;
 	my $all = shift;
+	my $xmpp = OpenSRF::Transport::PeerHandle->retrieve;
 
 	my $count;
 	if ($all) {
 		$count = $self->running;
 		while ($self->running) {
+			# block on the xmpp socket until data arrives
+			$xmpp->process(-1);
 			$self->session_reap;
 		}
 		return $count;
 	} else {
 		while(($count = $self->session_reap) == 0 && $self->running) {
-			usleep 100;
+			# block on the xmpp socket until data arrives
+			$xmpp->process(-1);
 		}
 		return $count;
 	}
 }
 
 sub session_reap {
+    my $self = shift;
+    $self->_session_reap;
+
+    # if any requests are marked complete as a side effect of 
+    # _session_reap, re-run _session_reap.  note that we check
+    # for completeness without touching the underlying socket
+    # (req->{complete} vs req->complete) to avoid additional 
+    # unintended socket-touching side effects.
+    while (grep { $_->{req}->{complete} } @{$self->{running}}) {
+        $self->_session_reap;
+    }
+}
+
+sub _session_reap {
 	my $self = shift;
 
 	my @done;
@@ -256,7 +274,7 @@ sub session_reap {
 			push @done, $req;
 
 		} else {
-			#$log->debug("Still running ".$req->{meth}." in session ".$req->{req}->session->session_id);
+			#$log->debug(sub{return "Still running ".$req->{meth}." in session ".$req->{req}->session->session_id });
 			push @running, $req;
 		}
 	}

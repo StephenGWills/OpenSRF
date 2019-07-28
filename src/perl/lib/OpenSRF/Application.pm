@@ -22,6 +22,7 @@ $log = 'OpenSRF::Utils::Logger';
 
 our $in_request = 0;
 our @pending_requests;
+our $shared_conf;
 
 sub package {
 	my $self = shift;
@@ -47,17 +48,24 @@ sub argc {
 	return $self->{argc};
 }
 
+sub max_bundle_size {
+	my $self = shift;
+	return 0 unless ref($self);
+	return $self->{max_bundle_size} if (defined($self->{max_bundle_size}));
+	return 25600; # 25K
+}
+
+sub max_bundle_count {
+	my $self = shift;
+	return 0 unless ref($self);
+	return $self->{max_bundle_count} || 0;
+}
+
 sub max_chunk_size {
 	my $self = shift;
 	return 0 unless ref($self);
 	return $self->{max_chunk_size} if (defined($self->{max_chunk_size}));
-	return 10240;
-}
-
-sub max_chunk_count {
-	my $self = shift;
-	return 0 unless ref($self);
-	return $self->{max_chunk_count} || 0;
+	return $self->max_bundle_size * 2;
 }
 
 sub api_name {
@@ -127,7 +135,28 @@ sub handler {
         my @p = $app_msg->params;
 		my $method_name = $app_msg->method;
 		my $method_proto = $session->last_message_api_level;
-		$log->info("CALL: ".$session->service." $method_name ". (@p ? join(', ',@p) : ''));
+
+		# By default, we log all method params at the info level
+		# Here we are consult our shared portion of the config file
+		# to look for any exceptions to this behavior
+		my $logdata = "CALL: ".$session->service." $method_name ";
+		my $redact_params = 0;
+		if (@p) {
+			if (ref($shared_conf->shared->log_protect) eq 'ARRAY') {
+				foreach my $match_string (@{$shared_conf->shared->log_protect}) {
+					if ($method_name =~ /^$match_string/) {
+						$redact_params = 1;
+						last;
+					}
+				}
+			}
+			if ($redact_params) {
+				$logdata .= "**PARAMS REDACTED**";
+			} else {
+				$logdata .= join(', ', map { (defined $_) ? $_ : '' } @p);
+			}
+		}
+		$log->info($logdata);
 
 		my $coderef = $app->method_lookup( $method_name, $method_proto, 1, 1 );
 
@@ -149,13 +178,15 @@ sub handler {
 
 		if (ref $coderef) {
 			my @args = $app_msg->params;
+			$coderef->session( $session );
 			my $appreq = OpenSRF::AppRequest->new( $session );
+			$appreq->max_bundle_size( $coderef->max_bundle_size );
+			$appreq->max_bundle_count( $coderef->max_bundle_count );
 			$appreq->max_chunk_size( $coderef->max_chunk_size );
-			$appreq->max_chunk_count( $coderef->max_chunk_count );
 
-			$log->debug( "in_request = $in_request : [" . $appreq->threadTrace."]", INTERNAL );
+			$log->debug(sub{return "in_request = $in_request : [" . $appreq->threadTrace."]" }, INTERNAL );
 			if( $in_request ) {
-				$log->debug( "Pushing onto pending requests: " . $appreq->threadTrace, DEBUG );
+				$log->debug(sub{return "Pushing onto pending requests: " . $appreq->threadTrace }, DEBUG );
 				push @pending_requests, [ $appreq, \@args, $coderef ]; 
 				return 1;
 			}
@@ -232,7 +263,7 @@ sub handler {
 
 			$in_request--;
 
-			$log->debug( "Pending Requests: " . scalar(@pending_requests), INTERNAL );
+			$log->debug(sub{return "Pending Requests: " . scalar(@pending_requests) }, INTERNAL );
 
 			# cycle through queued requests
 			while( my $aref = shift @pending_requests ) {
@@ -272,11 +303,11 @@ sub handler {
 					my $start = time;
 					my $response = $aref->[2]->run( $aref->[0], @{$aref->[1]} );
 					my $time = sprintf '%.3f', time - $start;
-					$log->debug( "Method duration for [".$aref->[2]->api_name." -> ".join(', ',@{$aref->[1]}).']:  '.$time, DEBUG );
+					$log->debug(sub{return "Method duration for [".$aref->[2]->api_name." -> ".join(', ',@{$aref->[1]}).']:  '.$time }, DEBUG );
 
 					$appreq = $aref->[0];	
 					$appreq->respond_complete( $response );
-					$log->debug( "Executed: " . $appreq->threadTrace, INTERNAL );
+					$log->debug(sub{return "Executed: " . $appreq->threadTrace }, INTERNAL );
 
 				} catch Error with {
 					my $e = shift;
@@ -414,7 +445,12 @@ sub register_method {
 		($args{object_hint} = $args{package}) =~ s/::/_/go;
 	}
 
-	OpenSRF::Utils::JSON->register_class_hint( name => $args{package}, hint => $args{object_hint}, type => "hash" );
+	OpenSRF::Utils::JSON->register_class_hint(
+		strip => ['session'],
+		name => $app,
+		hint => $args{object_hint},
+		type => "hash"
+	);
 
 	$_METHODS[$args{api_level}]{$args{api_name}} = bless \%args => $app;
 
@@ -509,7 +545,7 @@ sub method_lookup {
 	my $class = ref($self) || $self;
 
 	$log->debug("Lookup of [$method] by [$class] in api_level [$proto]", DEBUG);
-	$log->debug("Available methods\n\t".join("\n\t", keys %{ $_METHODS[$proto] }), INTERNAL);
+	$log->debug(sub{return "Available methods\n\t".join("\n\t", keys %{ $_METHODS[$proto] }) }, INTERNAL);
 
 	my $meth;
 	if (__PACKAGE__->thunk) {
@@ -536,7 +572,25 @@ sub method_lookup {
 		$meth = $self->method_lookup($method,$proto,1);
 	}
 
+	if ($meth && ref($self)) {
+		$meth->session($self->session); # Pass the caller's session
+		$meth->max_chunk_size($self->max_chunk_size);
+		$meth->max_bundle_size($self->max_bundle_size);
+	}
+
 	return $meth;
+}
+
+sub dispatch {
+	my $self = shift;
+	$log->debug("Creating a dispatching SubRequest object", DEBUG);
+    my $req = OpenSRF::AppSubrequest->new(
+        session => $self->session,
+        max_chunk_size  => $self->max_chunk_size,
+        max_bundle_size  => $self->max_bundle_size,
+        respond_directly => 1
+    );
+    return $self->run($req,@_);
 }
 
 sub run {
@@ -549,9 +603,11 @@ sub run {
 	if ( !UNIVERSAL::isa($req, 'OpenSRF::AppRequest') ) {
 		$log->debug("Creating a SubRequest object", DEBUG);
 		unshift @params, $req;
-		$req = OpenSRF::AppSubrequest->new;
-		$req->session( $self->session ) if ($self->session);
-
+		$req = OpenSRF::AppSubrequest->new(
+			session => $self->session,
+			max_chunk_size  => $self->max_chunk_size,
+			max_bundle_size  => $self->max_bundle_size
+		);
 	} else {
 		$log->debug("This is a top level request", DEBUG);
 	}
@@ -559,8 +615,16 @@ sub run {
 	if (!$self->{remote}) {
 		my $code = \&{$self->{package} . '::' . $self->{method}};
 		my $err = undef;
+		my $warnhandler;
 
 		try {
+			$warnhandler = $SIG{__WARN__};
+			$SIG{__WARN__} = sub {
+				(my $msg = shift) =~ s/\n$//;
+				$log->warn($self->{api_name} . ": $msg");
+				return 1; # prevents warning going out to stderr
+			};
+
 			$resp = $code->($self, $req, @params);
 
 		} catch Error with {
@@ -569,6 +633,8 @@ sub run {
 			if( ref($self) eq 'HASH') {
 				$log->error("Sub $$self{package}::$$self{method} DIED!!!\n\t$err\n", ERROR);
 			}
+		} finally {
+			$SIG{__WARN__} = $warnhandler;
 		};
 
 		if($err) {
@@ -580,11 +646,11 @@ sub run {
 		}
 
 
-		$log->debug("Coderef for [$$self{package}::$$self{method}] has been run", DEBUG);
+		$log->debug(sub{return "Coderef for [$$self{package}::$$self{method}] has been run" }, DEBUG);
 
-		if ( ref($req) and UNIVERSAL::isa($req, 'OpenSRF::AppSubrequest') ) {
+		if ( ref($req) and UNIVERSAL::isa($req, 'OpenSRF::AppSubrequest') and !$req->respond_directly ) {
 			$req->respond($resp) if (defined $resp);
-			$log->debug("SubRequest object is responding with : " . join(" ",$req->responses), DEBUG);
+			$log->debug(sub{return "SubRequest object is responding with : " . join(" ",$req->responses) }, DEBUG);
 			return $req->responses;
 		} else {
 			$log->debug("A top level Request object is responding $resp", DEBUG) if (defined $resp);
@@ -615,7 +681,7 @@ sub run {
 			$session->finish();
 		}
 
-		$log->debug( "Remote Subrequest Responses " . join(" ", $req->responses), INTERNAL );
+		$log->debug(sub{return "Remote Subrequest Responses " . join(" ", $req->responses) }, INTERNAL );
 
 		return $req->responses;
 	}

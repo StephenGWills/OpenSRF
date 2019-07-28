@@ -38,6 +38,9 @@ extern "C" {
 #define OSRF_STATUS_ACCEPTED             202
 #define OSRF_STATUS_COMPLETE             205
 
+#define OSRF_STATUS_PARTIAL              206
+#define OSRF_STATUS_NOCONTENT            204
+
 #define OSRF_STATUS_REDIRECTED           307
 
 #define OSRF_STATUS_BADREQUEST           400
@@ -50,6 +53,7 @@ extern "C" {
 
 #define OSRF_STATUS_INTERNALSERVERERROR  500
 #define OSRF_STATUS_NOTIMPLEMENTED       501
+#define OSRF_STATUS_SERVICEUNAVAILABLE   503
 #define OSRF_STATUS_VERSIONNOTSUPPORTED  505
 
 
@@ -92,14 +96,26 @@ struct osrf_message_struct {
 
 	/** Magical LOCALE hint. */
 	char* sender_locale;
+
+	/** Magical ingress hint. */
+	char* sender_ingress;
+
+	/** Magical TZ hint. */
+	char* sender_tz;
 };
 typedef struct osrf_message_struct osrfMessage;
 
 const char* osrf_message_set_locale( osrfMessage* msg, const char* locale );
 
+const char* osrf_message_set_tz( osrfMessage* msg, const char* tz );
+
+const char* osrfMessageSetIngress( osrfMessage* msg, const char* ingress );
+
 const char* osrf_message_set_default_locale( const char* locale );
 
 const char* osrf_message_get_last_locale(void);
+
+const char* osrf_message_get_last_tz(void);
 
 osrfMessage* osrf_message_init( enum M_TYPE type, int thread_trace, int protocol );
 

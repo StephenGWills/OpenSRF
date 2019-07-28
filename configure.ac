@@ -31,8 +31,6 @@ AM_INIT_AUTOMAKE([OpenSRF], m4_defn([VERSION_NUMBER]))
 
 AC_REVISION($Revision: 0.1 $)
 AC_CONFIG_SRCDIR([configure.ac])
-AC_PREFIX_DEFAULT([/opensrf])
-AC_CONFIG_MACRO_DIR([m4])
 
 # Enable $prefix to resolve to a reasonable value in substitutions in
 # scripts if no explict value was passed in to configure
@@ -124,20 +122,6 @@ esac],
 AM_CONDITIONAL([BUILDPYTHON], [test x$OSRF_INSTALL_PYTHON = xtrue])
 AC_SUBST([OSRF_INSTALL_PYTHON])
 
-# enable chopchop, the basic XMPP server
-
-AC_ARG_ENABLE([chopchop],
-[  --enable-chopchop    build and install chopchop, a basic XMPP server],
-[case "${enableval}" in
-    yes) OSRF_INSTALL_CHOPCHOP=true ;;
-    no) OSRF_INSTALL_CHOPCHOP=false ;; 
-  *) AC_MSG_ERROR([please choose another value for --enable-chopchop (supported values are yes or no)]) ;;
-esac],
-[OSRF_INSTALL_CHOPCHOP=false])
-
-AM_CONDITIONAL([BUILDCHOPCHOP], [test x$OSRF_INSTALL_CHOPCHOP = xtrue])
-AC_SUBST([OSRF_INSTALL_CHOPCHOP])
-
 # enable debug?
 
 AC_ARG_ENABLE(debug,
@@ -151,7 +135,7 @@ AM_CONDITIONAL(DEBUG, test x$debug = xtrue)
  
 # path to the directory containing the java dependency jar files (included if java installs)
 if test $OSRF_INSTALL_JAVA; then
-	AC_SUBST([OSRF_JAVA_DEPSDIR], [/opt/java])
+	AC_SUBST([OSRF_JAVA_DEPSDIR], [deps])
     AC_CONFIG_FILES([src/java/Makefile])
 fi
 
@@ -218,6 +202,50 @@ if ! test -d "$APR_HEADERS"; then
 fi
 AC_SUBST([APR_HEADERS])
 
+AC_ARG_WITH([perlbase],
+[  --with-perlbase=path             base location to install Perl modules (default based on Config.pm)],
+[PERL_BASE=${withval}],
+[PERL_BASE=x])
+AC_SUBST([PERL_BASE])
+
+AC_ARG_WITH([websockets-port],
+[  --with-websockets-port=path             WebSockets port to use (default is 7682)],
+[WS_PORT=${withval}],
+[WS_PORT=7682])
+AC_SUBST([WS_PORT])
+
+# The following Apache version detection code is adapted from
+# http://www.gnu.org/software/autoconf-archive/ax_prog_apache.html
+# licensed under version 2 of the GNU General Public License, or
+# (at your discretion) any later version.
+#
+# Copyright (c) 2008 Loic Dachary <loic@senga.org>
+#
+# Collect apache version number. If for nothing else, this
+# guarantees that httpd is a working apache executable.
+#
+APACHE=`$APXS2 -q progname`
+AC_PATH_PROG(APACHE_PATH, [$APACHE], [])
+if test -z "$APACHE_PATH" ; then
+	for i in /usr/bin /usr/sbin /usr/local/apache/bin /usr/local/apache2/bin ; do
+        if test -x "$i/$APACHE"; then
+            APACHE_PATH="$i/$APACHE"
+            break
+        fi
+	done
+fi
+changequote(<<, >>)dnl
+APACHE_READABLE_VERSION=`$APACHE_PATH -v | grep 'Server version' | sed -e 's;.*Apache/\([0-9\.][0-9\.]*\).*;\1;'`
+changequote([, ])dnl
+APACHE_VERSION=`echo $APACHE_READABLE_VERSION | sed -e 's/\.//g'`
+if test -z "$APACHE_VERSION" ; then
+    AC_MSG_ERROR("could not determine apache version number");
+fi
+APACHE_MAJOR=`expr $APACHE_VERSION : '\(..\)'`
+APACHE_MINOR=`expr $APACHE_VERSION : '..\(.*\)'`
+AM_CONDITIONAL(APACHE_MIN_24, test "$APACHE_MAJOR" -ge "24")
+AC_SUBST([APACHE_MIN_24])
+
 AC_ARG_WITH([libxml],
 [  --with-libxml=path               location of the libxml2 headers (default is /usr/include/libxml2/))],
 [LIBXML2_HEADERS=${withval}],
@@ -279,7 +307,7 @@ PKG_CHECK_MODULES([CHECK], [check >= 0.9.0], [enable_tests=yes],
 AM_CONDITIONAL(CHECK_TESTS, test x$enable_tests = xyes)
 
 if test "x$enable_tests" = "xno"; then
-  AC_MSG_WARN(Check unit testing framweork not found.)
+  AC_MSG_WARN(Check unit testing framework not found.)
 fi
 
 if test "x$OSRF_INSTALL_CORE" = "xtrue"; then
@@ -351,17 +379,18 @@ if test "x$OSRF_INSTALL_CORE" = "xtrue"; then
 			 examples/multisession-test.pl
 			 src/c-apps/Makefile
 			 src/gateway/Makefile
-			 src/jserver/Makefile
+			 src/javascript/opensrf_ws.js
+			 src/javascript/opensrf_ws_shared.js
 			 src/libopensrf/Makefile
 			 src/perl/Makefile
 			 src/ports/strn_compat/Makefile
 			 src/python/opensrf.py
 			 src/router/Makefile
 			 src/srfsh/Makefile
+			 src/websocket-stdio/Makefile
              tests/Makefile
 			 bin/opensrf-perl.pl
-			 bin/osrf_config
-			 bin/osrf_ctl.sh])
+			 bin/osrf_config])
 fi
 
 AC_OUTPUT
@@ -382,17 +411,12 @@ else
         AC_MSG_RESULT([OSRF install Python support?     no])
 fi
 
-if test "$OSRF_INSTALL_CHOPCHOP" = "true" ; then
-        AC_MSG_RESULT([OSRF install chopchop?           yes])
-else
-        AC_MSG_RESULT([OSRF install chopchop?           no])
-fi
-
         AC_MSG_RESULT(Installation directory prefix:   ${prefix})
         AC_MSG_RESULT(Temporary directory:             ${TMP})
         AC_MSG_RESULT(APXS2 location:                  ${APXS2})
         AC_MSG_RESULT(Apache headers location:         ${APACHE2_HEADERS})
         AC_MSG_RESULT(APR headers location:            ${APR_HEADERS})
+        AC_MSG_RESULT(Apache version:                  ${APACHE_READABLE_VERSION})
         AC_MSG_RESULT(libxml2 headers location:        ${LIBXML2_HEADERS})
 
 AC_MSG_RESULT([----------------------------------------------------------------------])

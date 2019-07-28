@@ -5,6 +5,7 @@ use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 use Time::HiRes qw/time/;
 use OpenSRF::Transport::SlimJabber::XMPPMessage;
 use OpenSRF::Utils::Logger qw/$logger/;
+use OpenSRF::EX;
 
 # -----------------------------------------------------------
 # Connect, disconnect, and authentication messsage templates
@@ -165,6 +166,11 @@ sub tcp_connected {
 # -----------------------------------------------------------
 sub send {
     my($self, $xml) = @_;
+        
+    local $SIG{'PIPE'} = sub {
+        $logger->error("Disconnected from Jabber server, exiting immediately");
+        exit(99);
+    };
     $self->{socket}->print($xml);
 }
 
@@ -204,22 +210,57 @@ sub wait {
     my $infile = '';
     vec($infile, $socket->fileno, 1) = 1;
 
-    my $nfound = select($infile, undef, undef, $timeout);
+    my $nfound;
+    if (!OpenSRF->OSRF_APACHE_REQUEST_OBJ || $timeout <= 1.0) {
+        $nfound = select($infile, undef, undef, $timeout);
+    } else {
+        $timeout -= 1.0;
+        for (
+            my $sleep = 1.0;
+            $timeout >= 0.0;
+            do {
+                $sleep = $timeout < 1.0 ? $timeout : 1.0;
+                $timeout -= 1.0;
+            }
+        ) {
+            $nfound = select($infile, undef, undef, $sleep);
+            last if $nfound;
+            if (
+                OpenSRF->OSRF_APACHE_REQUEST_OBJ &&
+                OpenSRF->OSRF_APACHE_REQUEST_OBJ->connection->aborted
+            ) {
+                # Should this be more severe? Die or throw error?
+                $logger->warn("Upstream Apache client disconnected, aborting.");
+                last;
+            };
+        }
+    }
     return undef if !$nfound or $nfound == -1;
 
     # now slurp the data off the socket
     my $buf;
     my $read_size = 1024;
     my $nonblock = 0;
+    my $nbytes;
+    my $first_read = 1;
 
-    while(my $n = sysread($socket, $buf, $read_size)) {
+    while($nbytes = sysread($socket, $buf, $read_size)) {
         $self->{parser}->parse_more($buf) if $buf;
-        if($n < $read_size or $self->peek_msg) {
+        if($nbytes < $read_size or $self->peek_msg) {
             set_block($socket) if $nonblock;
             last;
         }
         set_nonblock($socket) unless $nonblock;
         $nonblock = 1;
+        $first_read = 0;
+    }
+
+    if ($first_read and defined $nbytes and $nbytes == 0) {
+        # if the first read on an active socket is 0 bytes, 
+        # the socket has been disconnected from the remote end. 
+        $self->{stream_state} = DISCONNECTED;
+        $logger->error("Disconnected from Jabber server");
+        throw OpenSRF::EX::Jabber("Disconnected from Jabber server");
     }
 
     return $self->next_msg;
@@ -265,10 +306,15 @@ sub start_element {
 
         my $msg = $self->{message};
         $msg->{to} = $attrs{'to'};
-        $msg->{from} = $attrs{router_from} if $attrs{router_from};
-        $msg->{from} = $attrs{from} unless $msg->{from};
-        $msg->{osrf_xid} = $attrs{'osrf_xid'};
+        $msg->{from} = $attrs{from};
         $msg->{type} = $attrs{type};
+
+    } elsif($name eq 'opensrf') {
+
+        # These will be authoritative if they exist
+        my $msg = $self->{message};
+        $msg->{from} = $attrs{router_from} if $attrs{router_from};
+        $msg->{osrf_xid} = $attrs{'osrf_xid'};
 
     } elsif($name eq 'body') {
         $self->{xml_state} = IN_BODY;
@@ -333,9 +379,8 @@ sub flush_socket {
 	my $self = shift;
     return 0 unless $self->connected;
 
-    while ($self->wait(0)) {
-        # TODO remove this log line
-        $logger->info("flushing data from socket...");
+    while (my $excess = $self->wait(0)) {
+        $logger->info("flushing data from socket... $excess");
     }
 
     return $self->connected;

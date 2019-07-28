@@ -36,22 +36,18 @@ endif
 if INSTALLJAVASCRIPT
 MAYBE_JAVASCRIPT = javascript
 jsdir = $(prefix)/lib/javascript
-js_SCRIPTS = javascript/DojoSRF.js javascript/JSON_v0.js javascript/JSON_v1.js javascript/md5.js javascript/opensrf.js javascript/opensrf_xhr.js javascript/opensrf_xmpp.js
+js_SCRIPTS = javascript/DojoSRF.js javascript/JSON_v1.js javascript/md5.js javascript/opensrf.js javascript/opensrf_xhr.js javascript/opensrf_xmpp.js javascript/opensrf_ws.js javascript/opensrf_ws_shared.js
 endif
 
 if BUILDCORE
-MAYBE_CORE = libopensrf c-apps router srfsh gateway perl
+MAYBE_CORE = libopensrf c-apps router srfsh gateway perl websocket-stdio
 if BUILDPYTHON
 dist_bin_SCRIPTS = @top_srcdir@/bin/opensrf-perl.pl @top_srcdir@/src/python/opensrf.py @top_srcdir@/src/python/srfsh.py
 else
 dist_bin_SCRIPTS = @top_srcdir@/bin/opensrf-perl.pl
 endif
-bin_SCRIPTS = @top_srcdir@/bin/osrf_config @top_srcdir@/bin/osrf_ctl.sh 
+bin_SCRIPTS = @top_srcdir@/bin/osrf_config
 dist_sysconf_DATA = @top_srcdir@/examples/opensrf.xml.example @top_srcdir@/examples/opensrf_core.xml.example @top_srcdir@/examples/srfsh.xml.example 
-endif
-
-if BUILDCHOPCHOP
-MAYBE_CHOPCHOP = jserver
 endif
 
 SUBDIRS = $(MAYBE_CORE) $(MAYBE_PY) $(MAYBE_JA)
@@ -72,8 +68,10 @@ install-exec-hook:
 			rm "$(DESTDIR)@sysconfdir@/$${f}.bak" ; \
 		done; \
 	fi
-	cp -r @srcdir@/javascript/* $(DESTDIR)$(jsdir)/
+	if [ ! -e "$(DESTDIR)@bindir@/osrf_control" ]; then \
+		ln -s "opensrf-perl.pl" "$(DESTDIR)@bindir@/osrf_control"; \
+	fi
 
 uninstall-hook:
-	rm -f @includedir@/opensrf/apachetools.h
+	rm -f "$(DESTDIR)@includedir@/opensrf/apachetools.h"
 

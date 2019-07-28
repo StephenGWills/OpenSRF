@@ -55,6 +55,12 @@ vim:et:ts=2:sw=2:
     <syslog>local2</syslog>
     <actlog>local1</actlog>
     -->
+    <!-- Optional log tag.  You can use this to help distinguish
+         syslog entries when running multiple OpenSRF stacks on the
+         same server. -->
+    <!--
+    <logtag>instance1</logtag>
+    -->
 
     <!-- 0 None, 1 Error, 2 Warning, 3 Info, 4 debug, 5 Internal (Nasty) -->
     <loglevel>3</loglevel>
@@ -67,19 +73,6 @@ vim:et:ts=2:sw=2:
     <settings_config>SYSCONFDIR/opensrf.xml</settings_config>
 
   </opensrf>
-
-  <!-- Update this if you use ChopChop -->
-  <chopchop>
-    <!-- Our jabber server -->
-    <domain>private.localhost</domain>
-    <port>5222</port>
-    <!-- used when multiple servers need to communicate -->
-    <s2sport>5269</s2sport>
-    <secret>secret</secret>
-    <listen_address>10.0.0.3</listen_address>
-    <loglevel>3</loglevel>
-    <logfile>LOCALSTATEDIR/log/osrfsys.log</logfile>
-  </chopchop>
 
   <!-- The section between <gateway>...</gateway> is a standard OpenSRF C stack config file -->
   <gateway>
@@ -101,6 +94,14 @@ vim:et:ts=2:sw=2:
     <port>5222</port>
     <logfile>LOCALSTATEDIR/log/gateway.log</logfile>
     <loglevel>3</loglevel>
+
+    <!-- cross origin HTTP settings http://en.wikipedia.org/wiki/Cross-origin_resource_sharing -->
+    <cross_origin>
+        <!-- specify individual hosts -->
+        <!-- <origin>example.com</origin> -->
+        <!-- ...or use the * wildcard to match all -->
+        <!-- <origin>*</origin> -->
+    </cross_origin>
 
   </gateway>
 
@@ -131,6 +132,9 @@ vim:et:ts=2:sw=2:
             <logfile>syslog</logfile>
             <syslog>local2</syslog>
             -->
+            <!--
+            <logtag>instance1</logtag>
+            -->
             <loglevel>2</loglevel>
         </router>
         <router> <!-- private router -->
@@ -153,10 +157,25 @@ vim:et:ts=2:sw=2:
             <logfile>syslog</logfile>
             <syslog>local2</syslog>
             -->
+            <!--
+            <logtag>instance1</logtag>
+            -->
             <loglevel>4</loglevel>
         </router>
     </routers>
 
   <!-- ======================================================================================== -->
+
+  <shared>
+    <!-- Any methods which match any of these match_string node values will
+         have their params redacted from lower-level input logging.
+         Adjust these examples as needed. -->
+    <log_protect>
+    <!--
+      <match_string>open-ils.auth</match_string>
+      <match_string>open-ils.some_service.some_method</match_string>
+    -->
+    </log_protect>
+  </shared>
 
 </config>

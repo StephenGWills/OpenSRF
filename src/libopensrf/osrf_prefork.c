@@ -48,6 +48,7 @@ typedef struct {
 	int max_requests;     /**< How many requests a child processes before terminating. */
 	int min_children;     /**< Minimum number of children to maintain. */
 	int max_children;     /**< Maximum number of children to maintain. */
+	int max_backlog_queue; /**< Maximum size of backlog queue. */
 	int fd;               /**< Unused. */
 	int data_to_child;    /**< Unused. */
 	int data_to_parent;   /**< Unused. */
@@ -63,6 +64,7 @@ typedef struct {
 		raw memory, apart from the "next" pointer used to stitch them together.  In particular,
 		there is no child process for them, and the file descriptors are not open. */
 	struct prefork_child_struct* free_list;
+    struct prefork_child_struct* sighup_pending_list;
 	transport_client* connection;  /**< Connection to Jabber. */
 } prefork_simple;
 
@@ -85,7 +87,7 @@ typedef struct prefork_child_struct prefork_child;
 static volatile sig_atomic_t child_dead;
 
 static int prefork_simple_init( prefork_simple* prefork, transport_client* client,
-	int max_requests, int min_children, int max_children );
+	int max_requests, int min_children, int max_children, int max_backlog_queue );
 static prefork_child* launch_child( prefork_simple* forker );
 static void prefork_launch_children( prefork_simple* forker );
 static void prefork_run( prefork_simple* forker );
@@ -101,12 +103,24 @@ static prefork_child* prefork_child_init( prefork_simple* forker,
 
 /* listens on the 'data_to_child' fd and wait for incoming data */
 static void prefork_child_wait( prefork_child* child );
-static void prefork_clear( prefork_simple* );
+static void prefork_clear( prefork_simple*, bool graceful);
 static void prefork_child_free( prefork_simple* forker, prefork_child* );
-static void osrf_prefork_register_routers( const char* appname );
+static void osrf_prefork_register_routers( const char* appname, bool unregister );
 static void osrf_prefork_child_exit( prefork_child* );
 
 static void sigchld_handler( int sig );
+static void sigusr1_handler( int sig );
+static void sigusr2_handler( int sig );
+static void sigterm_handler( int sig );
+static void sigint_handler( int sig );
+static void sighup_handler( int sig );
+
+/** Maintain a global pointer to the prefork_simple object
+ *  for the current process so we can refer to it later
+ *  for signal handling.  There will only ever be one
+ *  forker per process.
+ */
+static prefork_simple *global_forker = NULL;
 
 /**
 	@brief Spawn and manage a collection of drone processes for servicing requests.
@@ -124,6 +138,7 @@ int osrf_prefork_run( const char* appname ) {
 
 	int maxr = 1000;
 	int maxc = 10;
+	int maxbq = 1000;
 	int minc = 3;
 	int kalive = 5;
 
@@ -133,6 +148,7 @@ int osrf_prefork_run( const char* appname ) {
 	char* max_req      = osrf_settings_host_value( "/apps/%s/unix_config/max_requests", appname );
 	char* min_children = osrf_settings_host_value( "/apps/%s/unix_config/min_children", appname );
 	char* max_children = osrf_settings_host_value( "/apps/%s/unix_config/max_children", appname );
+	char* max_backlog_queue = osrf_settings_host_value( "/apps/%s/unix_config/max_backlog_queue", appname );
 	char* keepalive    = osrf_settings_host_value( "/apps/%s/keepalive", appname );
 
 	if( !keepalive )
@@ -155,10 +171,16 @@ int osrf_prefork_run( const char* appname ) {
 	else
 		maxc = atoi( max_children );
 
+	if( !max_backlog_queue )
+		osrfLogWarning( OSRF_LOG_MARK, "Max backlog queue size not defined, assuming %d", maxbq );
+	else
+		maxbq = atoi( max_backlog_queue );
+
 	free( keepalive );
 	free( max_req );
 	free( min_children );
 	free( max_children );
+	free( max_backlog_queue );
 	/* --------------------------------------------------- */
 
 	char* resc = va_list_to_string( "%s_listener", appname );
@@ -174,7 +196,7 @@ int osrf_prefork_run( const char* appname ) {
 
 	prefork_simple forker;
 
-	if( prefork_simple_init( &forker, osrfSystemGetTransportClient(), maxr, minc, maxc )) {
+	if( prefork_simple_init( &forker, osrfSystemGetTransportClient(), maxr, minc, maxc, maxbq )) {
 		osrfLogError( OSRF_LOG_MARK,
 			"osrf_prefork_run() failed to create prefork_simple object" );
 		return -1;
@@ -183,19 +205,27 @@ int osrf_prefork_run( const char* appname ) {
 	// Finish initializing the prefork_simple.
 	forker.appname   = strdup( appname );
 	forker.keepalive = kalive;
+	global_forker = &forker;
 
 	// Spawn the children; put them in the idle list.
 	prefork_launch_children( &forker );
 
 	// Tell the router that you're open for business.
-	osrf_prefork_register_routers( appname );
+	osrf_prefork_register_routers( appname, false );
+
+	signal( SIGUSR1, sigusr1_handler);
+	signal( SIGUSR2, sigusr2_handler);
+	signal( SIGTERM, sigterm_handler);
+	signal( SIGINT,  sigint_handler );
+	signal( SIGQUIT, sigint_handler );
+	signal( SIGHUP,  sighup_handler );
 
 	// Sit back and let the requests roll in
 	osrfLogInfo( OSRF_LOG_MARK, "Launching osrf_forker for app %s", appname );
 	prefork_run( &forker );
 
 	osrfLogWarning( OSRF_LOG_MARK, "prefork_run() returned - how??" );
-	prefork_clear( &forker );
+	prefork_clear( &forker, false );
 	return 0;
 }
 
@@ -210,17 +240,30 @@ int osrf_prefork_run( const char* appname ) {
 	Called only by the parent process.
 */
 static void osrf_prefork_send_router_registration(
-		const char* appname, const char* routerName, const char* routerDomain ) {
+		const char* appname, const char* routerName, 
+            const char* routerDomain, bool unregister ) {
+
 	// Get a pointer to the global transport_client
 	transport_client* client = osrfSystemGetTransportClient();
 
 	// Construct the Jabber address of the router
 	char* jid = va_list_to_string( "%s@%s/router", routerName, routerDomain );
-	osrfLogInfo( OSRF_LOG_MARK, "%s registering with router %s", appname, jid );
 
 	// Create the registration message, and send it
-	transport_message* msg = message_init( "registering", NULL, NULL, jid, NULL );
-	message_set_router_info( msg, NULL, NULL, appname, "register", 0 );
+	transport_message* msg;
+    if (unregister) {
+
+	    osrfLogInfo( OSRF_LOG_MARK, "%s un-registering with router %s", appname, jid );
+	    msg = message_init( "unregistering", NULL, NULL, jid, NULL );
+	    message_set_router_info( msg, NULL, NULL, appname, "unregister", 0 );
+
+    } else {
+
+	    osrfLogInfo( OSRF_LOG_MARK, "%s registering with router %s", appname, jid );
+	    msg = message_init( "registering", NULL, NULL, jid, NULL );
+	    message_set_router_info( msg, NULL, NULL, appname, "register", 0 );
+    }
+
 	client_send_message( client, msg );
 
 	// Clean up
@@ -241,7 +284,8 @@ static void osrf_prefork_send_router_registration(
 
 	Called only by the parent process.
 */
-static void osrf_prefork_parse_router_chunk( const char* appname, const jsonObject* routerChunk ) {
+static void osrf_prefork_parse_router_chunk( 
+    const char* appname, const jsonObject* routerChunk, bool unregister ) {
 
 	const char* routerName = jsonObjectGetString( jsonObjectGetKeyConst( routerChunk, "name" ));
 	const char* domain = jsonObjectGetString( jsonObjectGetKeyConst( routerChunk, "domain" ));
@@ -261,19 +305,19 @@ static void osrf_prefork_parse_router_chunk( const char* appname, const jsonObje
 			for( j = 0; j < service_obj->size; j++ ) {
 				const char* service = jsonObjectGetString( jsonObjectGetIndex( service_obj, j ));
 				if( service && !strcmp( appname, service ))
-					osrf_prefork_send_router_registration( appname, routerName, domain );
+					osrf_prefork_send_router_registration( appname, routerName, domain, unregister );
 			}
 		}
 		else if( JSON_STRING == service_obj->type ) {
 			// There's only one service listed.  Register with this router
 			// if and only if this service is the one listed.
 			if( !strcmp( appname, jsonObjectGetString( service_obj )) )
-				osrf_prefork_send_router_registration( appname, routerName, domain );
+				osrf_prefork_send_router_registration( appname, routerName, domain, unregister );
 		}
 	} else {
 		// This router is not restricted to any set of services,
 		// so go ahead and register with it.
-		osrf_prefork_send_router_registration( appname, routerName, domain );
+		osrf_prefork_send_router_registration( appname, routerName, domain, unregister );
 	}
 }
 
@@ -283,7 +327,7 @@ static void osrf_prefork_parse_router_chunk( const char* appname, const jsonObje
 
 	Called only by the parent process.
 */
-static void osrf_prefork_register_routers( const char* appname ) {
+static void osrf_prefork_register_routers( const char* appname, bool unregister ) {
 
 	jsonObject* routerInfo = osrfConfigGetValueObject( NULL, "/routers/router" );
 
@@ -297,12 +341,12 @@ static void osrf_prefork_register_routers( const char* appname ) {
 			char* domain = osrfConfigGetValue( NULL, "/routers/router" );
 			osrfLogDebug( OSRF_LOG_MARK, "found simple router settings with router name %s",
 				routerName );
-			osrf_prefork_send_router_registration( appname, routerName, domain );
+			osrf_prefork_send_router_registration( appname, routerName, domain, unregister );
 
 			free( routerName );
 			free( domain );
 		} else {
-			osrf_prefork_parse_router_chunk( appname, routerChunk );
+			osrf_prefork_parse_router_chunk( appname, routerChunk, unregister );
 		}
 	}
 
@@ -337,6 +381,7 @@ static int prefork_child_init_hook( prefork_child* child ) {
 	free( isclient );
 
 	// Remove traces of our parent's socket connection so we can have our own.
+    // TODO: not necessary if parent disconnects first
 	osrfSystemIgnoreTransportClient();
 
 	// Connect to Jabber
@@ -486,10 +531,11 @@ static int prefork_child_process_request( prefork_child* child, char* data ) {
 			before terminating.
 	@param min_children Minimum number of child processes to maintain.
 	@param max_children Maximum number of child processes to maintain.
+	@param max_backlog_queue Maximum size of backlog queue.
 	@return 0 if successful, or 1 if not (due to invalid parameters).
 */
 static int prefork_simple_init( prefork_simple* prefork, transport_client* client,
-		int max_requests, int min_children, int max_children ) {
+		int max_requests, int min_children, int max_children, int max_backlog_queue ) {
 
 	if( min_children > max_children ) {
 		osrfLogError( OSRF_LOG_MARK,  "min_children (%d) is greater "
@@ -510,6 +556,7 @@ static int prefork_simple_init( prefork_simple* prefork, transport_client* clien
 	prefork->max_requests = max_requests;
 	prefork->min_children = min_children;
 	prefork->max_children = max_children;
+	prefork->max_backlog_queue = max_backlog_queue;
 	prefork->fd           = 0;
 	prefork->data_to_child = 0;
 	prefork->data_to_parent = 0;
@@ -520,6 +567,7 @@ static int prefork_simple_init( prefork_simple* prefork, transport_client* clien
 	prefork->idle_list    = NULL;
 	prefork->free_list    = NULL;
 	prefork->connection   = client;
+	prefork->sighup_pending_list = NULL;
 
 	return 0;
 }
@@ -584,6 +632,15 @@ static prefork_child* launch_child( prefork_simple* forker ) {
 
 	else { /* child */
 
+		// we don't want to adopt our parent's handlers.
+		signal( SIGUSR1, SIG_DFL );
+		signal( SIGUSR2, SIG_DFL );
+		signal( SIGTERM, SIG_DFL );
+		signal( SIGINT,  SIG_DFL );
+		signal( SIGQUIT, SIG_DFL );
+		signal( SIGCHLD, SIG_DFL );
+		signal( SIGHUP,  SIG_DFL );
+
 		osrfLogInternal( OSRF_LOG_MARK,
 			"I am new child with read_data_fd = %d and write_status_fd = %d",
 			child->read_data_fd, child->write_status_fd );
@@ -642,6 +699,120 @@ static void sigchld_handler( int sig ) {
 }
 
 /**
+	@brief Signal handler for SIGUSR1
+	@param sig The value of the trapped signal; always SIGUSR1.
+
+	Send unregister command to all registered routers.
+*/
+static void sigusr1_handler( int sig ) {
+	if (!global_forker) return;
+	osrf_prefork_register_routers(global_forker->appname, true);
+	signal( SIGUSR1, sigusr1_handler );
+}
+
+/**
+	@brief Signal handler for SIGUSR2
+	@param sig The value of the trapped signal; always SIGUSR2.
+
+	Send register command to all known routers
+*/
+static void sigusr2_handler( int sig ) {
+	if (!global_forker) return;
+	osrf_prefork_register_routers(global_forker->appname, false);
+	signal( SIGUSR2, sigusr2_handler );
+}
+
+/**
+	@brief Signal handler for SIGTERM
+	@param sig The value of the trapped signal; always SIGTERM
+
+	Perform a graceful prefork server shutdown.
+*/
+static void sigterm_handler(int sig) {
+	if (!global_forker) return;
+	osrfLogInfo(OSRF_LOG_MARK, "server: received SIGTERM, shutting down");
+	prefork_clear(global_forker, true);
+	_exit(0);
+}
+
+/**
+	@brief Signal handler for SIGINT or SIGQUIT
+	@param sig The value of the trapped signal
+
+	Perform a non-graceful prefork server shutdown.
+*/
+static void sigint_handler(int sig) {
+	if (!global_forker) return;
+	osrfLogInfo(OSRF_LOG_MARK, "server: received SIGINT/QUIT, shutting down");
+	prefork_clear(global_forker, false);
+	_exit(0);
+}
+
+static void sighup_handler(int sig) {
+    if (!global_forker) return;
+    osrfLogInfo(OSRF_LOG_MARK, "server: received SIGHUP, reloading config");
+
+    osrfConfig* oldConfig = osrfConfigGetDefaultConfig();
+    osrfConfig* newConfig = osrfConfigInit(
+        oldConfig->configFileName, oldConfig->configContext);
+
+    if (!newConfig) {
+        osrfLogError(OSRF_LOG_MARK, "Config reload failed");
+        return;
+    }
+
+    // frees oldConfig
+    osrfConfigSetDefaultConfig(newConfig); 
+    
+    // apply the log level from the reloaded file
+    char* log_level = osrfConfigGetValue(NULL, "/loglevel");
+    if(log_level) {
+        int level = atoi(log_level);
+        osrfLogSetLevel(level);
+    }
+
+    // Copy the list of active children into the sighup_pending list.
+    // Cloning is necessary, since the nodes in the active list, particularly
+    // their next/prev pointers, will start changing once we exit this func.
+    // sighup_pending_list is a non-circular, singly linked list.
+    prefork_child* cur_child = global_forker->first_child;
+    prefork_child* clone;
+
+    // the first_pid lets us know when we've made a full circle of the active 
+    // children
+    pid_t first_pid = 0;
+    while (cur_child && cur_child->pid != first_pid) {
+
+        if (!first_pid) first_pid = cur_child->pid;
+
+        // all we need to keep track of is the pid
+        clone = safe_malloc(sizeof(prefork_child));
+        clone->pid = cur_child->pid;
+        clone->next = NULL;
+
+        osrfLogDebug(OSRF_LOG_MARK, 
+            "Adding child %d to sighup pending list", clone->pid);
+
+        // add the clone to the front of the list
+        if (global_forker->sighup_pending_list) 
+            clone->next = global_forker->sighup_pending_list;
+        global_forker->sighup_pending_list = clone;
+
+        cur_child = cur_child->next;
+    }
+
+    // Kill all idle children.
+    // Let them get cleaned up through the normal response-handling cycle
+    cur_child = global_forker->idle_list;
+    while (cur_child) {
+        osrfLogDebug(OSRF_LOG_MARK, "Killing child in SIGHUP %d", cur_child->pid);
+        kill(cur_child->pid, SIGKILL);
+        cur_child = cur_child->next;
+    }
+}
+    
+
+/**
 	@brief Replenish the collection of child processes, after one has terminated.
 	@param forker Pointer to the prefork_simple that manages the child processes.
 
@@ -651,7 +822,7 @@ static void sigchld_handler( int sig ) {
 	Wait on the dead children so that they won't be zombies.  Spawn new ones as needed
 	to maintain at least a minimum number.
 */
-void reap_children( prefork_simple* forker ) {
+static void reap_children( prefork_simple* forker ) {
 
 	pid_t child_pid;
 
@@ -690,6 +861,16 @@ static void prefork_run( prefork_simple* forker ) {
 
 	transport_message* cur_msg = NULL;
 
+	// The backlog queue accumulates messages received while there
+	// are not yet children available to process them. While the
+	// transport client maintains its own queue of messages, sweeping
+	// the transport client's queue in the backlog queue gives us the
+	// ability to set a limit on the size of the backlog queue (and
+	// then to drop messages once the backlog queue has filled up)
+	transport_message* backlog_queue_head = NULL;
+	transport_message* backlog_queue_tail = NULL;
+	int backlog_queue_size = 0;
+
 	while( 1 ) {
 
 		if( forker->first_child == NULL && forker->idle_list == NULL ) {/* no more children */
@@ -697,31 +878,98 @@ static void prefork_run( prefork_simple* forker ) {
 			return;
 		}
 
-		// Wait indefinitely for an input message
-		osrfLogDebug( OSRF_LOG_MARK, "Forker going into wait for data..." );
-		cur_msg = client_recv( forker->connection, -1 );
-
-		if( cur_msg == NULL )
-			continue;           // Error?  Interrupted by a signal?  Try again...
-
-		message_prepare_xml( cur_msg );
-		const char* msg_data = cur_msg->msg_xml;
-		if( ! msg_data || ! *msg_data ) {
-			osrfLogWarning( OSRF_LOG_MARK, "Received % message from %s, thread %",
-				(msg_data ? "empty" : "NULL"), cur_msg->sender, cur_msg->thread );
-			message_free( cur_msg );
-			continue;       // Message not usable; go on to the next one.
+		int received_from_network = 0;
+		if ( backlog_queue_size == 0 ) {
+			// Wait indefinitely for an input message
+			osrfLogDebug( OSRF_LOG_MARK, "Forker going into wait for data..." );
+			cur_msg = client_recv( forker->connection, -1 );
+			received_from_network = 1;
+		} else {
+			// See if any messages are immediately available
+			cur_msg = client_recv( forker->connection, 0 );
+			if ( cur_msg != NULL )
+				received_from_network = 1;
 		}
+
+		if (received_from_network) {
+			if( cur_msg == NULL ) {
+				// most likely a signal was received.  clean up any recently
+				// deceased children and try again.
+				if(child_dead)
+					reap_children(forker);
+				continue;
+			}
+
+			if (cur_msg->error_type) {
+				osrfLogInfo(OSRF_LOG_MARK,
+					"Listener received an XMPP error message.  "
+					"Likely a bounced message. sender=%s", cur_msg->sender);
+				if(child_dead)
+					reap_children(forker);
+				continue;
+			}
+
+			message_prepare_xml( cur_msg );
+			const char* msg_data = cur_msg->msg_xml;
+			if( ! msg_data || ! *msg_data ) {
+				osrfLogWarning( OSRF_LOG_MARK, "Received % message from %s, thread %",
+					(msg_data ? "empty" : "NULL"), cur_msg->sender, cur_msg->thread );
+				message_free( cur_msg );
+				continue;       // Message not usable; go on to the next one.
+			}
+
+			// stick message onto queue
+			cur_msg->next = NULL;
+			if (backlog_queue_size == 0) {
+				backlog_queue_head = cur_msg;
+				backlog_queue_tail = cur_msg;
+			} else {
+				if (backlog_queue_size >= forker->max_backlog_queue) {
+					osrfLogWarning ( OSRF_LOG_MARK, "Reached backlog queue limit of %d; dropping "
+						"latest message",
+						forker->max_backlog_queue );
+					osrfMessage* err = osrf_message_init( STATUS, 1, 1 );
+					osrf_message_set_status_info( err, "osrfMethodException",
+						"Service unavailable: no available children and backlog queue at limit",
+						OSRF_STATUS_SERVICEUNAVAILABLE );
+					char *data = osrf_message_serialize( err );
+					osrfMessageFree( err );
+					transport_message* tresponse = message_init( data, "", cur_msg->thread, cur_msg->router_from, cur_msg->recipient );
+					message_set_osrf_xid(tresponse, cur_msg->osrf_xid);
+					free( data );
+					transport_client* client = osrfSystemGetTransportClient();
+					client_send_message( client, tresponse );
+					message_free( tresponse );
+					message_free(cur_msg);
+					continue;
+				}
+				backlog_queue_tail->next = cur_msg;
+				backlog_queue_tail = cur_msg;
+				osrfLogWarning( OSRF_LOG_MARK, "Adding message to non-empty backlog queue." );
+			}
+			backlog_queue_size++;
+		}
+
+		if (backlog_queue_size == 0) {
+			// strictly speaking, this check may be redundant, but
+			// from this point forward we can be sure that the
+			// backlog queue has at least one message in it and
+			// that if we can find a child to process it, we want to
+			// process the head of that queue.
+			continue;
+		}
+
+		cur_msg = backlog_queue_head;
 
 		int honored = 0;     /* will be set to true when we service the request */
 		int no_recheck = 0;
 
 		while( ! honored ) {
 
-            if( !no_recheck ) {
-                if(check_children( forker, 0 ) < 0) {
+			if( !no_recheck ) {
+				if(check_children( forker, 0 ) < 0) {
                     continue; // check failed, try again
-                }
+				}
             }
             no_recheck = 0;
 
@@ -750,6 +998,7 @@ static void prefork_run( prefork_simple* forker ) {
 				osrfLogInternal( OSRF_LOG_MARK, "Writing to child fd %d",
 					cur_child->write_data_fd );
 
+				const char* msg_data = cur_msg->msg_xml;
 				int written = write( cur_child->write_data_fd, msg_data, strlen( msg_data ) + 1 );
 				if( written < 0 ) {
 					// This child appears to be dead or unusable.  Discard it.
@@ -784,6 +1033,7 @@ static void prefork_run( prefork_simple* forker ) {
 						osrfLogDebug( OSRF_LOG_MARK, "Writing to new child fd %d : pid %d",
 							new_child->write_data_fd, new_child->pid );
 
+						const char* msg_data = cur_msg->msg_xml;
 						int written = write(
 							new_child->write_data_fd, msg_data, strlen( msg_data ) + 1 );
 						if( written < 0 ) {
@@ -806,20 +1056,21 @@ static void prefork_run( prefork_simple* forker ) {
                 }
             }
 
-			if( !honored ) {
-				osrfLogWarning( OSRF_LOG_MARK, "No children available, waiting..." );
-				if( check_children( forker, 1 ) >= 0 ) {
-				    // Tell the loop not to call check_children again, since we just successfully called it
-				    no_recheck = 1;
-                }
-			}
-
 			if( child_dead )
 				reap_children( forker );
 
+			if( !honored ) {
+				break;
+			}
+
 		} // end while( ! honored )
 
-		message_free( cur_msg );
+		if ( honored ) {
+			backlog_queue_head = cur_msg->next;
+			backlog_queue_size--;
+			cur_msg->next = NULL;
+			message_free( cur_msg );
+		}
 
 	} /* end top level listen loop */
 }
@@ -844,10 +1095,11 @@ static int check_children( prefork_simple* forker, int forever ) {
 
 	if( NULL == forker->first_child ) {
 		// If forever is true, then we're here because we've run out of idle
-		// processes, so there should be some active ones around.
+		// processes, so there should be some active ones around, except during
+		// graceful shutdown, as we wait for all active children to become idle.
 		// If forever is false, then the children may all be idle, and that's okay.
 		if( forever )
-			osrfLogError( OSRF_LOG_MARK, "No active child processes to check" );
+			osrfLogDebug( OSRF_LOG_MARK, "No active child processes to check" );
 		return 0;
 	}
 
@@ -869,8 +1121,6 @@ static int check_children( prefork_simple* forker, int forever ) {
 	FD_CLR( 0, &read_set ); /* just to be sure */
 
 	if( forever ) {
-		osrfLogWarning( OSRF_LOG_MARK,
-			"We have no children available - waiting for one to show up..." );
 
 		if( (select_ret=select( max_fd + 1, &read_set, NULL, NULL, NULL )) == -1 ) {
 			osrfLogWarning( OSRF_LOG_MARK, "Select returned error %d on check_children: %s",
@@ -892,7 +1142,7 @@ static int check_children( prefork_simple* forker, int forever ) {
 	}
 
     if( select_ret <= 0 ) // we're done here
-        return select_ret;
+		return select_ret;
 
 	// Check each child in the active list.
 	// If it has responded, move it to the idle list.
@@ -919,23 +1169,64 @@ static int check_children( prefork_simple* forker, int forever ) {
 				osrfLogDebug( OSRF_LOG_MARK,  "Read %d bytes from status buffer: %s", n, buf );
 			}
 
-			// Remove the child from the active list
-			if( forker->first_child == cur_child ) {
-				if( cur_child->next == cur_child )
-					forker->first_child = NULL;   // only child in the active list
-				else
-					forker->first_child = cur_child->next;
-			}
-			cur_child->next->prev = cur_child->prev;
-			cur_child->prev->next = cur_child->next;
 
-			// Add it to the idle list
-			cur_child->prev = NULL;
-			cur_child->next = forker->idle_list;
-			forker->idle_list = cur_child;
-		}
-		cur_child = next_child;
-	} while( forker->first_child && forker->first_child != next_child );
+            // if this child is in the sighup_pending list, kill the child,
+            // but leave it in the active list so that it won't be picked
+            // for new work.  When reap_children() next runs, it will be 
+            // properly cleaned up.
+            prefork_child* hup_child = forker->sighup_pending_list;
+            prefork_child* prev_hup_child = NULL;
+            int hup_cleanup = 0;
+
+            while (hup_child) {
+                pid_t hup_pid = hup_child->pid;
+                if (hup_pid == cur_child->pid) {
+
+                    osrfLogDebug(OSRF_LOG_MARK, 
+                        "server: killing previously-active child after "
+                        "receiving SIGHUP: %d", hup_pid);
+
+                    if (forker->sighup_pending_list == hup_child) {
+                        // hup_child is the first (maybe only) in the list
+                        forker->sighup_pending_list = hup_child->next;
+                    } else {
+                        // splice it from the list
+                        prev_hup_child->next = hup_child->next;
+                    }
+
+                    free(hup_child); // clean up the thin clone
+                    kill(hup_pid, SIGKILL);
+                    hup_cleanup = 1;
+                    break;
+                }
+
+                prev_hup_child = hup_child;
+                hup_child = hup_child->next;
+            }
+
+            if (!hup_cleanup) {
+
+                // Remove the child from the active list
+                if( forker->first_child == cur_child ) {
+                    if( cur_child->next == cur_child ) {
+                        // only child in the active list
+                        forker->first_child = NULL;   
+                    } else {
+                        forker->first_child = cur_child->next;
+                    }
+                }
+                cur_child->next->prev = cur_child->prev;
+                cur_child->prev->next = cur_child->next;
+
+                // Add it to the idle list
+                cur_child->prev = NULL;
+                cur_child->next = forker->idle_list;
+                forker->idle_list = cur_child;
+            }
+        }
+
+        cur_child = next_child;
+    } while( forker->first_child && forker->first_child != next_child );
 
     return select_ret;
 }
@@ -1159,12 +1450,30 @@ static prefork_child* prefork_child_init( prefork_simple* forker,
 
 	We do not deallocate the prefork_simple itself, just its contents.
 */
-static void prefork_clear( prefork_simple* prefork ) {
+static void prefork_clear( prefork_simple* prefork, bool graceful ) {
 
-	// Kill all the active children, and move their prefork_child nodes to the free list.
+	// always de-register routers before killing child processes (or waiting
+	// for them to complete) so that new requests are directed elsewhere.
+	osrf_prefork_register_routers(global_forker->appname, true);
+
 	while( prefork->first_child ) {
-		kill( prefork->first_child->pid, SIGKILL );
-		del_prefork_child( prefork, prefork->first_child->pid );
+
+		if (graceful) {
+			// wait for at least one active child to become idle, then repeat.
+			// once complete, all children will be idle and cleaned up below.
+			osrfLogInfo(OSRF_LOG_MARK, "graceful shutdown waiting...");
+			check_children(prefork, 1);
+
+		} else {
+			// Kill and delete all the active children
+			kill( prefork->first_child->pid, SIGKILL );
+			del_prefork_child( prefork, prefork->first_child->pid );
+		}
+	}
+
+	if (graceful) {
+		osrfLogInfo(OSRF_LOG_MARK,
+			"all active children are now idle in graceful shutdown");
 	}
 
 	// Kill all the idle prefork children, close their file

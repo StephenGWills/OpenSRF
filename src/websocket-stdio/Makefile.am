@@ -1,5 +1,5 @@
-# Copyright (C) 2008 Equinox Software, Inc.
-# Kevin Beswick <kevinbeswick00@gmail.com>
+# Copyright (C) 2018 King County Library Service
+# Bill Erickson <berickxx@gmail.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -12,12 +12,11 @@
 # GNU General Public License for more details.
 
 
-LDADD = -lxml2 $(DEF_LDLIBS)
-AM_CFLAGS = $(DEF_CFLAGS) -D_GNU_SOURCE -L@top_builddir@/src/libopensrf
+LDADD = $(DEF_LDLIBS) 
+AM_CFLAGS = $(DEF_CFLAGS) -DEXEC_DEFAULT -L@top_builddir@/src/libopensrf
 AM_LDFLAGS = $(DEF_LDFLAGS)
 
 DISTCLEANFILES = Makefile.in Makefile
 
-bin_PROGRAMS = chopchop
-chopchop_SOURCES = osrf_chat.c osrf_chat.h osrf_chat_main.c
-
+bin_PROGRAMS = osrf-websocket-stdio
+osrf_websocket_stdio_SOURCES = osrf-websocket-stdio.c

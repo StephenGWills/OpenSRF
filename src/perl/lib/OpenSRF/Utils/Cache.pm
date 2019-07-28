@@ -2,6 +2,7 @@ package OpenSRF::Utils::Cache;
 use strict; use warnings;
 use base qw/OpenSRF/;
 use Cache::Memcached;
+use Digest::MD5 qw(md5_hex);
 use OpenSRF::Utils::Logger qw/:level/;
 use OpenSRF::Utils::Config;
 use OpenSRF::Utils::SettingsClient;
@@ -94,9 +95,6 @@ sub new {
 	$self->{persist} = $persist || 0;
 	$self->{memcache} = Cache::Memcached->new( { servers => $servers } ); 
 	if(!$self->{memcache}) {
-        open(CACHEFOO, '>', '/tmp/cached');
-        print CACHEFOO "De nada\n";
-        close(CACHEFOO);
 		throw OpenSRF::EX::PANIC ("Unable to create a new memcache object for $cache_type");
 	}
 
@@ -112,7 +110,12 @@ sub new {
 
 sub put_cache {
 	my($self, $key, $value, $expiretime ) = @_;
+
 	return undef unless( defined $key and defined $value );
+
+	$key = _clean_cache_key($key);
+
+	return undef if( $key eq '' ); # no zero-length keys
 
 	$value = OpenSRF::Utils::JSON->perl2JSON($value);
 
@@ -158,7 +161,9 @@ sub put_cache {
 
 sub delete_cache {
 	my( $self, $key ) = @_;
-	if(!$key) { return undef; }
+	return undef unless defined $key;
+	$key = _clean_cache_key($key);
+	return undef if $key eq ''; # no zero-length keys
 	if($self->{persist}){ _load_methods(); }
 	$self->{memcache}->delete($key);
 	if( $self->{persist} ) {
@@ -174,6 +179,12 @@ sub delete_cache {
 
 sub get_cache {
 	my($self, $key ) = @_;
+
+	return undef unless defined $key;
+
+	$key = _clean_cache_key($key);
+
+	return undef if $key eq ''; # no zero-length keys
 
 	my $val = $self->{memcache}->get( $key );
 	return OpenSRF::Utils::JSON->JSON2perl($val) if defined($val);
@@ -251,10 +262,32 @@ sub _load_methods {
 }
 
 
+=head2 _clean_cache_key
 
+Try to make the requested cache key conform to memcached's requirements. Per
+https://github.com/memcached/memcached/blob/master/doc/protocol.txt:
 
+"""
+Data stored by memcached is identified with the help of a key. A key
+is a text string which should uniquely identify the data for clients
+that are interested in storing and retrieving it.  Currently the
+length limit of a key is set at 250 characters (of course, normally
+clients wouldn't need to use such long keys); the key must not include
+control characters or whitespace.
+"""
 
+=cut
 
+sub _clean_cache_key {
+    my $key = shift;
+
+    $key =~ s{(\p{Cntrl}|\s)}{}g;
+    if (length($key) > 250) { # max length of memcahed key
+        $key = 'shortened_' . md5_hex($key);
+    }
+
+    return $key;
+}
 
 1;
 

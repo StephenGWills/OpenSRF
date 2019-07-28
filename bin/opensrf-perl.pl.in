@@ -1,7 +1,8 @@
 #!/usr/bin/perl
 # ---------------------------------------------------------------
-# Copyright (C) 2008  Georgia Public Library Service
-# Bill Erickson <erickson@esilibrary.com>
+# Copyright (C) 2008-2013 Georgia Public Library Service
+# Copyright (C) 2013 Equinox Software, Inc
+# Bill Erickson <berick@esilibrary.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -25,7 +26,6 @@ use OpenSRF::Transport::Listener;
 use OpenSRF::Utils;
 use OpenSRF::Utils::Config;
 
-my $opt_action = undef;
 my $opt_service = undef;
 my $opt_config = "@CONF_DIR@/opensrf_core.xml";
 my $opt_pid_dir = "@PID_DIR@/run/opensrf";
@@ -33,13 +33,42 @@ my $opt_no_daemon = 0;
 my $opt_settings_pause = 0;
 my $opt_localhost = 0;
 my $opt_help = 0;
-my $verbose = 0;
+my $opt_shutdown_graceful = 0;
+my $opt_shutdown_fast = 0;
+my $opt_shutdown_immediate = 0;
+my $opt_shutdown_graceful_all = 0;
+my $opt_shutdown_fast_all = 0;
+my $opt_shutdown_immediate_all = 0;
+my $opt_kill_with_fire = 0;
+my $opt_signal = ''; # signal name
+my $opt_signal_all = 0;
+my $opt_signal_timeout = 30;
+my $opt_start = 0;
+my $opt_stop = 0;
+my $opt_restart = 0;
+my $opt_start_all = 0;
+my $opt_stop_all = 0;
+my $opt_restart_all = 0;
+my $opt_start_services = 0;
+my $opt_stop_services = 0;
+my $opt_restart_services = 0;
+my $opt_force_clean_process = 0;
+my $opt_router_de_register = 0;
+my $opt_router_de_register_all = 0;
+my $opt_router_re_register = 0;
+my $opt_router_re_register_all = 0;
+my $opt_reload = 0;
+my $opt_reload_all = 0;
+my $opt_quiet = 0;
+my $opt_diagnostic = 0;
+my $opt_ignore_orphans = 0;
 my $sclient;
+my @perl_services;
+my @nonperl_services;
+my %max_children_map;
 my $hostname = $ENV{OSRF_HOSTNAME} || hostfqdn();
-my @hosted_services;
 
 GetOptions(
-    'action=s' => \$opt_action,
     'service=s' => \$opt_service,
     'config=s' => \$opt_config,
     'pid-dir=s' => \$opt_pid_dir,
@@ -47,7 +76,35 @@ GetOptions(
     'settings-startup-pause=i' => \$opt_settings_pause,
     'localhost' => \$opt_localhost,
     'help' => \$opt_help,
-    'verbose' => \$verbose,
+    'quiet' => \$opt_quiet,
+    'graceful-shutdown' => \$opt_shutdown_graceful,
+    'fast-shutdown' => \$opt_shutdown_fast,
+    'immediate-shutdown' => \$opt_shutdown_immediate,
+    'graceful-shutdown-all' => \$opt_shutdown_graceful_all,
+    'fast-shutdown-all' => \$opt_shutdown_fast_all,
+    'immediate-shutdown-all' => \$opt_shutdown_immediate_all,
+    'kill-with-fire' => \$opt_kill_with_fire,
+    'force-clean-process' => \$opt_force_clean_process,
+    'signal-timeout' => \$opt_signal_timeout,
+    'signal=s' => \$opt_signal,
+    'signal-all' => \$opt_signal_all,
+    'start' => \$opt_start,
+    'stop' => \$opt_stop,
+    'start-all' => \$opt_start_all,
+    'stop-all' => \$opt_stop_all,
+    'restart' => \$opt_restart,
+    'restart-all' => \$opt_restart_all,
+    'start-services' => \$opt_start_services,
+    'stop-services' => \$opt_stop_services,
+    'restart-services' => \$opt_restart_services,
+    'router-de-register' => \$opt_router_de_register,
+    'router-de-register-all' => \$opt_router_de_register_all,
+    'router-re-register' => \$opt_router_re_register,
+    'router-re-register-all' => \$opt_router_re_register_all,
+    'reload' => \$opt_reload,
+    'reload-all' => \$opt_reload_all,
+    'diagnostic' => \$opt_diagnostic,
+    'ignore-orphans' => \$opt_ignore_orphans
 );
 
 if ($opt_localhost) {
@@ -55,39 +112,216 @@ if ($opt_localhost) {
     $ENV{OSRF_HOSTNAME} = $hostname;
 }
 
-sub haltme {
-    kill('INT', -$$); #kill all in process group
+my $C_COMMAND = "opensrf-c -c $opt_config -x opensrf -p $opt_pid_dir -h $hostname";
+my $PY_COMMAND = "opensrf.py -f $opt_config -p $opt_pid_dir ". ($opt_localhost ? '-l' : '');
+
+sub verify_services {
+    my $service = shift;
+    return 1 if $service and $service eq 'router';
+    my @services = (@perl_services, map {$_->{service}} @nonperl_services);
+    if (@services) {
+        return 1 unless $service;
+        return 1 if grep { $_ eq $service } @services;
+        msg("$service is not configured to run on $hostname");
+    } else {
+        msg("No services are configured to run on $hostname");
+    }
+    msg("Perhaps you meant to use --localhost?") unless $opt_localhost;
     exit;
-};
-$SIG{INT} = \&haltme;
-$SIG{TERM} = \&haltme;
+}
+
+sub do_signal_send {
+    my $service = shift;
+    my $signal = shift;
+
+    my @pids = get_service_pids_from_file($service);
+
+    if (!@pids) {
+        # no PID files exist.  see if the service is running anyway
+
+        @pids = get_service_pids_from_ps($service);
+        if (!@pids) {
+            msg("cannot signal $service : no pid file or running process");
+            return 0;
+        }
+    }
+
+    for my $pid (@pids) {
+        if (kill($signal, $pid) == 0) { # no process was signaled.  
+            msg("cannot signal $service: process $pid is not running");
+            my $pidfile = get_pid_file($service);
+            unlink $pidfile if $pidfile;
+            next;
+        }
+
+        msg("sending $signal signal to pid=$pid $service");
+    }
+
+    return 1;
+}
+
+# returns 2 if a process should have gone away but did not
+# in the case of multiple PIDs (e.g. router), return the 
+# status of any failures, but not the successes.
+sub do_signal_wait {
+    my $service = shift;
+    my @pids = get_service_pids_from_file($service);
+
+    my $stat = 1;
+    for my $pid (@pids) {
+
+        # to determine whether a process has died, we have to send
+        # a no-op signal to the PID and check the success of that signal
+        my $sig_count;
+        for my $i (1..$opt_signal_timeout) {
+            $sig_count = kill(0, $pid);
+            last unless $sig_count;
+            sleep(1);
+        }
+
+        if ($sig_count) {
+            msg("timed out waiting on $service pid=$pid to die");
+            $stat = 2;
+            next;
+        }
+
+        # cleanup successful. remove the PID file
+        my $pidfile = get_pid_file($service);
+        unlink $pidfile if $pidfile;
+    }
+
+    return $stat;
+}
 
 sub get_pid_file {
     my $service = shift;
     return "$opt_pid_dir/$service.pid";
 }
 
-# stop a specific service
-sub do_stop {
+# services usually only have 1 pid, but the router will have at least 2
+sub get_service_pids_from_file {
     my $service = shift;
     my $pid_file = get_pid_file($service);
-    if(-e $pid_file) {
-        my $pid = `cat $pid_file`;
-        chomp $pid;
-        msg("stopping service pid=$pid $service", 1);
-        kill('INT', $pid);
-        waitpid($pid, 0);
-        unlink $pid_file;
-    } else {
-        msg("$service not running");
+    return () unless -e $pid_file;
+    my @pids = `cat $pid_file`;
+    s/^\s*|\n//g for @pids;
+    return @pids;
+}
+
+sub get_service_pids_from_ps {
+    my $service = shift;
+
+    my $ps = ($service eq 'router') ?
+        "ps x | grep 'OpenSRF Router'" :
+        "ps x | grep 'OpenSRF Listener \\[$service\\]'";
+
+    $ps .= " | grep -v grep |  sed 's/^\\s*//' | cut -d' ' -f1";
+    my @pids = `$ps`;
+    s/^\s*|\n//g for @pids;
+
+    return @pids;
+}
+
+
+sub do_diagnostic {
+    my $alive = do_init(1);
+
+    my @services = get_service_list_from_files(1);
+    my @conf_services;
+    if ($alive) {
+        @conf_services = (@perl_services, 
+            map {$_->{service}} @nonperl_services);
+        push(@services, @conf_services);
+    }
+    
+    my %services;
+    my $len = 0;
+    for my $svc (@services) {
+        $len = length($svc) if length($svc) > $len;
+        $services{$svc} = 1;
+    }
+
+    for my $svc (sort keys %services) {
+        my @pf_pids = get_service_pids_from_file($svc);
+        my @ps_pids = get_service_pids_from_ps($svc); 
+        my $svc_str = sprintf("%-${len}s ", $svc);
+        my %seen;
+
+        unless(@ps_pids or @pf_pids) {
+            msg("$svc_str is not running");
+            next;
+        }
+
+        for my $pid (@ps_pids) {
+            $seen{$pid} = 1;
+
+            my $str = "$svc_str [$pid] ";
+            my $times = `ps -o etime=,cputime= $pid`;
+            $times =~ s/^\s+|\s+$//g;
+            my @times = split(/ /, $times);
+            $str .= sprintf("uptime=%-11s cputime=%-11s ", $times[0], $times[1]);
+
+            if ($svc eq 'router') {
+                msg($str);
+            } else {
+                my @drones = `pgrep -f "Drone \\[$svc\\]"`;
+                my $dcount = scalar(@drones);
+                my $dmax = $max_children_map{$svc};
+                if (defined($dmax) && $dmax > 0) {
+                    $str .= "#drones=$dcount/$dmax ";
+                    $str .= sprintf('%3d%%', (int(($dcount / $dmax) * 100)));
+                } else {
+                    $str .= "#drones=$dcount";
+                }
+                msg($str);
+                msg("\tERR $svc has no running drones.") unless @drones;
+            }
+
+            msg("\tERR $svc [$pid] NOT configured for this host.")
+                unless grep {$_ eq $svc} @conf_services 
+                or $svc eq 'router';
+
+            msg("\tERR $svc [$pid] NOT found in PID file.")
+                unless grep {$_ eq $pid} @pf_pids;
+        }
+
+        for my $pid (@pf_pids) {
+            next if $seen{$pid};
+            msg("\tERR $svc Has PID file entry [$pid], ".
+                "which matches no running $svc processes");
+        }
+    }
+}
+
+
+
+sub do_start_router {
+
+    my $pidfile = get_pid_file('router');
+    `opensrf_router $opt_config routers $pidfile`;
+
+    sleep 2; # give the router time to fork (probably not need now but w/e)
+}
+
+# stop a specific service
+sub do_stop {
+    my ($service, @signals) = @_;
+    @signals = qw/TERM INT KILL/ unless @signals;
+    for my $sig (@signals) {
+        last unless do_signal($service, $sig) == 2;
     }
     return 1;
 }
 
 sub do_init {
+    my $fail_ok = shift;
+
     OpenSRF::System->bootstrap_client(config_file => $opt_config);
-    die "Unable to bootstrap client for requests\n"
-        unless OpenSRF::Transport::PeerHandle->retrieve;
+
+    if (!OpenSRF::Transport::PeerHandle->retrieve) {
+        return 0 if $fail_ok;
+        die "Unable to bootstrap client for requests\n";
+    }
 
     load_settings(); # load the settings config if we can
 
@@ -101,11 +335,19 @@ sub do_init {
         $apps = [$apps] unless ref $apps;
         for my $app (@$apps) {
             if (!$sclient->config_value('apps', $app)) {
-                msg("Service '$app' is listed for this host, but there is no configuration for it in $opt_config");
+                msg("Service '$app' is listed for this host, ".
+                    "but there is no configuration for it in $opt_config");
                 next;
             }
-            if ($sclient->config_value('apps', $app, 'language') =~ /perl/i) {
-                push(@hosted_services, $app);
+            my $lang = $sclient->config_value('apps', $app, 'language') || '';
+
+            $max_children_map{$app} = $sclient->config_value(
+                'apps', $app, 'unix_config', 'max_children');
+
+            if ($lang =~ /perl/i) {
+                push(@perl_services, $app);
+            } else {
+                push(@nonperl_services, {service => $app, lang => $lang});
             }
         }
     }
@@ -116,39 +358,218 @@ sub do_init {
 sub do_start {
     my $service = shift;
 
-    if(-e get_pid_file($service)) {
-        msg("$service is already running");
-        return;
+    my @pf_pids = get_service_pids_from_file($service);
+    my @ps_pids = get_service_pids_from_ps($service); 
+
+    if (@pf_pids) { # had pidfile
+
+        if (@ps_pids) {
+            msg("service $service already running : @ps_pids");
+            return;
+
+        } else { # stale pidfile
+
+            my $pidfile = get_pid_file($service);
+            msg("removing stale pid file $pidfile");
+            unlink $pidfile;
+        }
+
+    } elsif (@ps_pids and not $opt_ignore_orphans) { # orphan process
+
+        if ($opt_force_clean_process) {
+            msg("service $service pid=@ps_pids is running with no pidfile");
+            do_signal($service, 'KILL');
+        } else {
+            msg("service $service pid=@ps_pids is running with no pidfile! ".
+                "use --force-clean-process to automatically kill orphan processes");
+            return;
+        }
     }
+
+    return do_start_router() if $service eq 'router';
 
     load_settings() if $service eq 'opensrf.settings';
 
-    if(grep { $_ eq $service } @hosted_services) {
+    if(grep { $_ eq $service } @perl_services) {
         return unless do_daemon($service);
-        OpenSRF::System->run_service($service);
+        OpenSRF::System->run_service($service, $opt_pid_dir);
+
+    } else {
+        # note: we don't daemonize non-perl services, but instead
+        # assume the controller for other languages manages that.
+        my ($svc) = grep { $_->{service} eq $service } @nonperl_services;
+        if ($svc) {
+            if ($svc->{lang} =~ /c/i) {
+                system("$C_COMMAND -a start -s $service");
+                return;
+            } elsif ($svc->{lang} =~ /python/i) {
+                system("$PY_COMMAND -a start -s $service");
+                return;
+            }
+        }
     }
 
-    msg("$service is not configured to run on $hostname");
-    return 1;
+    # should not get here
+    return 0;
 }
 
+
 sub do_start_all {
-    msg("starting all services for $hostname", 1);
-    if(grep {$_ eq 'opensrf.settings'} @hosted_services) {
+    msg("starting router and services for $hostname");
+    do_start('router');
+    return do_start_services();
+}
+
+sub do_start_services {
+    msg("starting services for $hostname");
+
+    if(grep {$_ eq 'opensrf.settings'} @perl_services) {
         do_start('opensrf.settings');
         # in batch mode, give opensrf.settings plenty of time to start 
         # before any non-Perl services try to connect
         sleep $opt_settings_pause if $opt_settings_pause;
     }
-    for my $service (@hosted_services) {
+
+    # start Perl services
+    for my $service (@perl_services) {
         do_start($service) unless $service eq 'opensrf.settings';
     }
+
+    # start each non-perl service individually instead of using the native
+    # start-all command.  this allows us to test for existing pid files 
+    # and/or running processes on each service before starting.
+    # it also means each service has to connect-fetch_setting-disconnect
+    # from jabber, which makes startup slightly slower than native start-all
+    do_start($_->{service}) for @nonperl_services;
+
+    return 1;
+}
+
+# signal a single service
+sub do_signal {
+    my $service = shift;
+    my $signal = shift;
+    return do_signal_all($signal, $service);
+}
+
+# returns the list of running services based on presence of PID files.
+# the 'router' service is not included by deault, since it's 
+# usually treated special.
+sub get_service_list_from_files {
+    my $include_router = shift;
+    my @services = `ls $opt_pid_dir/*.pid 2> /dev/null`;
+    s/^\s*|\n//g for @services;
+    s|.*/(.*)\.pid$|$1| for @services;
+    return @services if $include_router;
+    return grep { $_ ne 'router' } @services;
+} 
+
+sub do_signal_all {
+    my ($signal, @services) = @_;                                              
+    @services = get_service_list_from_files() unless @services;     
+
+    do_signal_send($_, $signal) for @services;
+
+    # if user passed a know non-shutdown signal, we're done.
+    return if $signal =~ /HUP|USR1|USR2/;
+
+    do_signal_wait($_) for @services;
+}
+
+# pull all opensrf listener and drone PIDs from 'ps', 
+# kill them all, and remove all pid files
+sub do_kill_with_fire {
+    msg("killing with fire");
+
+    my @pids = get_running_pids();
+    for (@pids) {
+        next unless $_ =~ /\d+/;
+        my $proc = `ps -p $_ -o cmd=`;
+        chomp $proc;
+        msg("killing with fire pid=$_ $proc");
+        kill('KILL', $_);
+    }
+
+    # remove all of the pid files
+    my @files = `ls $opt_pid_dir/*.pid 2> /dev/null`;
+    s/^\s*|\n//g for @files;
+    for (@files) {
+        msg("removing pid file $_");
+        unlink $_;
+    }
+}
+
+sub get_running_pids {
+    my @pids;
+
+    # start with the listeners, then drones, then routers
+    my @greps = (
+        "ps x | grep 'OpenSRF Listener' ",
+        "ps x | grep 'OpenSRF Drone' ",
+        "ps x | grep 'OpenSRF Router' "
+    );
+
+    $_ .= "| grep -v grep |  sed 's/^\\s*//' | cut -d' ' -f1" for @greps;
+
+    for my $grep (@greps) {
+        my @spids = `$grep`;
+        s/^\s*|\n//g for @spids;
+        push (@pids, @spids);
+    }
+
+    return @pids;
+}
+
+sub clear_stale_pids {
+    my @pidfile_services = get_service_list_from_files(1);
+    my @running_pids = get_running_pids();
+    
+    for my $svc (@pidfile_services) {
+        my @pids = get_service_pids_from_file($svc);
+        for my $pid (@pids) {
+            next if grep { $_ eq $pid } @running_pids;
+            my $pidfile = get_pid_file($svc);
+            msg("removing stale pid file $pidfile");
+            unlink $pidfile;
+        }
+    }
+}
+
+sub do_stop_services {
+    my @signals = @_;
+    @signals = qw/TERM INT KILL/ unless @signals;
+
+    msg("stopping services for $hostname");
+    my @services = get_service_list_from_files();
+
+    for my $signal (@signals) {
+        my @redo;
+
+        # send the signal to all PIDs
+        do_signal_send($_, $signal) for @services;
+
+        # then wait for them to go away
+        for my $service (@services) {
+            push(@redo, $service) if do_signal_wait($service) == 2;
+        }
+
+        @services = @redo;
+        last unless @services;
+    }
+
     return 1;
 }
 
 sub do_stop_all {
-    msg("stopping all services for $hostname", 1);
-    do_stop($_) for @hosted_services;
+    my @signals = @_;
+    @signals = qw/TERM INT KILL/ unless @signals;
+
+    do_stop_services(@signals);
+
+    # graceful shutdown requires the presence of the router, so stop the 
+    # router last.  See if it's running first to avoid unnecessary warnings.
+    do_stop('router', $signals[0]) if get_service_pids_from_file('router'); 
+
     return 1;
 }
 
@@ -157,9 +578,11 @@ sub do_daemon {
     return 1 if $opt_no_daemon;
     my $service = shift;
     my $pid_file = get_pid_file($service);
-    #exit if OpenSRF::Utils::safe_fork();
-    return 0 if OpenSRF::Utils::safe_fork();
-    msg("starting service pid=$$ $service", 1);
+    my $pid = OpenSRF::Utils::safe_fork();
+    if ($pid) { # parent
+        msg("starting service pid=$pid $service");
+        return 0;
+    }
     chdir('/');
     setsid();
     close STDIN;
@@ -185,29 +608,19 @@ sub load_settings {
 
 sub msg {
     my $m = shift;
-    my $v = shift;
-    print "* $m\n" unless $v and not $verbose;
+    print "* $m\n" unless $opt_quiet;
 }
 
 sub do_help {
     print <<HELP;
 
-    Usage: perl $0 --pid-dir @TMP@ --config @CONF_DIR@/opensrf_core.xml --service opensrf.settings --action start
+    Usage: $0 --localhost --start-all
 
-    --action <action>
-        Actions include start, stop, restart, and start_all, stop_all, and restart_all
-
-    --service <service>
-        Specifies which OpenSRF service to control
-
-    --config <file>
+    --config <file> [default: @CONF_DIR@/opensrf_core.xml]
         OpenSRF configuration file 
         
-    --pid-dir <dir>
+    --pid-dir <dir> [default: @PID_DIR@/run/opensrf]
         Directory where process-specific PID files are kept
-        
-    --no-daemon
-        Do not detach and run as a daemon process.  Useful for debugging.
 
     --settings-startup-pause
         How long to give the opensrf.settings server to start up when running 
@@ -218,20 +631,199 @@ sub do_help {
     --localhost
         Force the hostname to be 'localhost', instead of the fully qualified
         domain name for the machine.
-        
+
+    --service <service>
+        Specifies which OpenSRF service to control
+
+    --quiet
+        Do not print informational messages to STDOUT 
+
+    --no-daemon
+        Do not detach and run as a daemon process.  Useful for debugging.  
+        Only works for Perl services and only when starting a single service.
+
     --help
         Print this help message
+
+    --diagnostic
+        Print information about running services
+
+    ==== starting services =====
+
+    --start-all
+        Start the router and all services
+
+    --start
+        Start the service specified by --service
+
+    --start-services
+        Start all services but do not start any routers
+
+    --restart-all
+        Restart the router and all services
+
+    --restart
+        Restart the service specified by --service
+
+    --restart-services
+        Restart all services but do not restart any routers
+
+    --force-clean-process
+        When starting a service, if a service process is already running 
+        but no pidfile exists, kill the service process before starting
+        the new one. This applies to routers too.
+
+    --ignore-orphans
+        When starting a service, if a service process is already running but
+        no pidfile exists, ignore the existing process and carry on starting
+        the new one (i.e., ignore orphans).  This applies to routers too.
+
+    ==== stopping services =====
+
+    --stop-all
+        Stop the router and all services.  Services are sent the TERM signal,
+        followed by the INT signal, followed by the KILL signal.  With each
+        iteration, the script pauses up to --signal-timeout seconds waiting
+        for each process to die before sending the next signal.
+
+    --stop
+        Stop the service specified by --service.  See also --stop-all.
+        If the requested service does not have a matching PID file, an
+        attempt to locate the PID via 'ps' will be made.
+
+    --stop-services
+        Stop all services but do not stop any routers.  See also --stop-all.
+
+    --graceful-shutdown-all
+        Send TERM signal to all services + router
+
+    --graceful-shutdown
+        Send TERM signal to the service specified by --service
+
+    --fast-shutdown-all
+        Send INT signal to all services + router
+
+    --fast-shutdown
+        Send INT signal to the service specified by --service
+
+    --immediate-shutdown-all
+        Send KILL signal to all services + router
+
+    --immediate-shutdown
+        Send KILL signal to the service specified by --service
+
+    --kill-with-fire
+        Send KILL signal to all running services + routers, regardless of 
+        the presence of a PID file, and remove all PID files indiscriminately.  
+
+    ==== signaling services =====
+
+    --signal-all
+        Send signal to all services
+
+    --signal
+        Name of signal to send.  If --signal-all is not specified, the 
+        signal will be sent to the service specified by --service.
+
+    --signal-timeout
+        Seconds to wait for a process to die after sending a shutdown signal.
+        All signals except HUP, USR1, and USR2 are assumed to be shutdown signals.
+
+    ==== special signals ====
+
+    --router-de-register
+    --router-de-register-all
+        Sends a SIGUSR1 signal to the selected service(s), which causes each 
+        service's listener process to send an "unregister" command to all 
+        registered routers.  The --all variant sends the signal to all 
+        running listeners.  The non-(--all) variant requires a --service.
+
+    --router-re-register
+    --router-re-register-all
+        Sends a SIGUSR2 signal to the selected service(s), which causes each 
+        service's listener process to send a "register" command to all 
+        configured routers.  The --all variant sends the signal to all
+        running listeners.  The non-(--all) variant requires a --service.
+
+    --reload
+    --reload-all
+        Sends a SIGHUP signal to the selected service(s).  SIGHUP causes
+        each listener process to reload its opensrf_core.xml config file 
+        and gracefully re-launch drone processes.  The -all variant sends
+        the signal to all services.  The non-(-all) variant requires a
+        --service.
 HELP
 exit;
 }
 
+# we do not verify services for stop/signal actions, since those may
+# legitimately be used against services not (or no longer) configured
+# to run on the selected host.
+do_init() and verify_services($opt_service) if
+    ($opt_start or
+    $opt_start_all or
+    $opt_start_services or
+    $opt_restart or
+    $opt_restart_all or
+    $opt_restart_services) and (
+        not defined $opt_service or $opt_service ne 'router'
+    );
 
-do_help() if $opt_help or not $opt_action;
-do_init() and do_start($opt_service) if $opt_action eq 'start';
-do_stop($opt_service) if $opt_action eq 'stop';
-do_init() and do_stop($opt_service) and do_start($opt_service) if $opt_action eq 'restart';
-do_init() and do_start_all() if $opt_action eq 'start_all';
-do_init() and do_stop_all() if $opt_action eq 'stop_all';
-do_init() and do_stop_all() and do_start_all() if $opt_action eq 'restart_all';
+# starting services.  do_init() handled above
+do_start($opt_service) if $opt_start;
+do_stop($opt_service) and do_start($opt_service) if $opt_restart;
+do_start_all() if $opt_start_all;
+do_start_services() if $opt_start_services;
+do_stop_all() and do_start_all() if $opt_restart_all;
+do_stop_services() and do_start_services() if $opt_restart_services;
+
+# stopping services
+do_stop($opt_service) if $opt_stop;
+do_stop_all() if $opt_stop_all;
+do_stop_services() if $opt_stop_services;
+do_stop($opt_service, 'TERM') if $opt_shutdown_graceful;
+do_stop($opt_service, 'INT') if $opt_shutdown_fast;
+do_stop($opt_service, 'KILL') if $opt_shutdown_immediate;
+do_stop_all('TERM') if $opt_shutdown_graceful_all;
+do_stop_all('INT') if $opt_shutdown_fast_all;
+do_stop_all('KILL') if $opt_shutdown_immediate_all;
+do_kill_with_fire() if $opt_kill_with_fire;
+
+# signaling
+$opt_signal = 'USR1' if $opt_router_de_register or $opt_router_de_register_all;
+$opt_signal = 'USR2' if $opt_router_re_register or $opt_router_re_register_all;
+$opt_signal = 'HUP'  if $opt_reload or $opt_reload_all;
+
+do_signal($opt_service, $opt_signal) if $opt_signal and $opt_service;
+do_signal_all($opt_signal) if 
+    $opt_signal_all or 
+    $opt_reload_all or
+    $opt_router_de_register_all or 
+    $opt_router_re_register_all;
+
+# misc
+do_diagnostic() if $opt_diagnostic;
 
 
+# show help if no action was requested
+do_help() if $opt_help or not (
+    $opt_start or 
+    $opt_start_all or 
+    $opt_start_services or 
+    $opt_stop or 
+    $opt_stop_all or 
+    $opt_stop_services or 
+    $opt_restart or 
+    $opt_restart_all or 
+    $opt_restart_services or 
+    $opt_signal or 
+    $opt_signal_all or
+    $opt_shutdown_graceful or
+    $opt_shutdown_graceful_all or
+    $opt_shutdown_fast or
+    $opt_shutdown_fast_all or
+    $opt_shutdown_immediate or
+    $opt_shutdown_immediate_all or
+    $opt_kill_with_fire or
+    $opt_diagnostic
+)

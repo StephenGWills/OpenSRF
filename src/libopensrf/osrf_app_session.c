@@ -7,6 +7,8 @@
 #include "opensrf/osrf_app_session.h"
 #include "opensrf/osrf_stack.h"
 
+static char* current_ingress = NULL;
+
 struct osrf_app_request_struct {
 	/** The controlling session. */
 	struct osrf_app_session_struct* session;
@@ -21,6 +23,9 @@ struct osrf_app_request_struct {
 	osrfMessage* payload;
 	/** Linked list of responses to the request. */
 	osrfMessage* result;
+
+    /** Buffer used to collect partial response messages */
+    growing_buffer* part_response_buffer;
 
 	/** Boolean; if true, then a call that is waiting on a response will reset the
 	timeout and set this variable back to false. */
@@ -74,6 +79,7 @@ static osrfAppRequest* _osrf_app_request_init(
 	req->reset_timeout  = 0;
 	req->next           = NULL;
 	req->prev           = NULL;
+	req->part_response_buffer = NULL;
 
 	return req;
 }
@@ -96,6 +102,9 @@ static void _osrf_app_request_free( osrfAppRequest * req ) {
 			req->result = next_msg;
 		}
 
+        if (req->part_response_buffer)
+            buffer_free(req->part_response_buffer);
+
 		free( req );
 	}
 }
@@ -112,8 +121,57 @@ static void _osrf_app_request_push_queue( osrfAppRequest* req, osrfMessage* resu
 	if(req == NULL || result == NULL)
 		return;
 
+    if (result->status_code == OSRF_STATUS_PARTIAL) {
+        osrfLogDebug(OSRF_LOG_MARK, "received partial message response");
+
+        if (!req->part_response_buffer) {
+            // assume the max_chunk_size of the server matches ours for
+            // buffer initialization,  since the setting will usually be 
+            // a site-wide value.
+	        req->part_response_buffer = buffer_init(OSRF_MSG_CHUNK_SIZE + 1);
+        }
+
+        const char* partial = jsonObjectGetString(result->_result_content);
+
+        if (partial != NULL) {
+            osrfLogDebug(OSRF_LOG_MARK, 
+                "adding %d bytes to response buffer", strlen(partial));
+        
+            // add the partial contents of the message to the buffer
+            buffer_add(req->part_response_buffer, partial);
+        }
+
+        // all done.  req and result are freed by the caller
+        return;
+
+    } else if (result->status_code == OSRF_STATUS_NOCONTENT) {
+        if (req->part_response_buffer && req->part_response_buffer->n_used) {
+
+            // part_response_buffer contains a stitched-together JSON string
+            osrfLogDebug(OSRF_LOG_MARK, 
+                "partial response complete, parsing %d bytes", 
+                req->part_response_buffer->n_used);
+
+            // coerce the partial-complete response into a standard RESULT.
+            osrf_message_set_status_info(result, NULL, "OK", OSRF_STATUS_OK);
+
+            // use the stitched-together JSON string as the result conten
+            osrf_message_set_result_content(
+                result, req->part_response_buffer->buf);
+
+            // free string, keep the buffer
+            buffer_reset(req->part_response_buffer); 
+
+        } else {
+            osrfLogDebug(OSRF_LOG_MARK, 
+                "Received OSRF_STATUS_NOCONTENT with no preceeding content");
+            return;
+        }
+    }
+
 	osrfLogDebug( OSRF_LOG_MARK, "App Session pushing request [%d] onto request queue",
 			result->thread_trace );
+
 	if(req->result == NULL) {
 		req->result = result;   // Add the first node
 
@@ -370,6 +428,51 @@ char* osrf_app_session_set_locale( osrfAppSession* session, const char* locale )
 }
 
 /**
+	@brief Install a copy of a TZ string in a specified session.
+	@param session Pointer to the osrfAppSession in which the TZ is to be installed.
+	@param TZ The TZ string to be copied and installed.
+	@return A pointer to the installed copy of the TZ string.
+*/
+char* osrf_app_session_set_tz( osrfAppSession* session, const char* tz ) {
+	if (!session || !tz)
+		return NULL;
+
+	if(session->session_tz) {
+		if( strlen(session->session_tz) >= strlen(tz) ) {
+			/* There's room available; just copy */
+			strcpy(session->session_tz, tz);
+		} else {
+			free(session->session_tz);
+			session->session_tz = strdup( tz );
+		}
+	} else {
+		session->session_tz = strdup( tz );
+	}
+
+	return session->session_tz;
+}
+
+/**
+	@brief Install a copy of a ingress string as the new default.
+	@param session Pointer to the new strdup'ed default_ingress
+	@param ingress The ingress string to be copied and installed.
+*/
+char* osrfAppSessionSetIngress(const char* ingress) {
+	if (!ingress) return NULL;
+    if(current_ingress) 
+        free(current_ingress);
+    return current_ingress = strdup(ingress);
+}
+
+/**
+    @brief Returns the current ingress value
+    @return A pointer to the installed copy of the ingress string 
+*/
+const char* osrfAppSessionGetIngress() {
+    return current_ingress;
+}
+
+/**
 	@brief Find the osrfAppSession for a given session id.
 	@param session_id The session id to look for.
 	@return Pointer to the corresponding osrfAppSession if found, or NULL if not.
@@ -477,6 +580,7 @@ osrfAppSession* osrfAppSessionClientInit( const char* remote_service ) {
 	session->orig_remote_id = strdup(session->remote_id);
 	session->remote_service = strdup(remote_service);
 	session->session_locale = NULL;
+	session->session_tz = NULL;
 	session->transport_error = 0;
 	session->panic = 0;
 	session->outbuf = NULL;   // Not used by client
@@ -581,6 +685,7 @@ osrfAppSession* osrf_app_server_session_init(
 	session->state = OSRF_SESSION_DISCONNECTED;
 	session->type = OSRF_SESSION_SERVER;
 	session->session_locale = NULL;
+	session->session_tz = NULL;
 
 	session->userData = NULL;
 	session->userDataFree = NULL;
@@ -688,6 +793,12 @@ static int osrfAppSessionMakeLocaleRequest(
 	} else if (session->session_locale) {
 		osrf_message_set_locale(req_msg, session->session_locale);
 	}
+
+	osrf_message_set_tz(req_msg, session->session_tz);
+
+	if (!current_ingress)
+		osrfAppSessionSetIngress("opensrf");
+	osrfMessageSetIngress(req_msg, current_ingress);
 
 	if(params) {
 		osrf_message_set_params(req_msg, params);
@@ -971,6 +1082,79 @@ static int osrfAppSessionSendBatch( osrfAppSession* session, osrfMessage* msgs[]
 }
 
 /**
+	@brief Split a given string into one or more transport result messages and send it
+	@param session Pointer to the osrfAppSession responsible for sending the message(s).
+	@param request_id Request ID of the osrfAppRequest.
+	@param payload A string to be sent via Jabber.
+	@param payload_size length of payload
+	@param chunk_size chunk_size to use
+
+	@return 0 upon success, or -1 upon failure.
+*/
+int osrfSendChunkedResult(
+        osrfAppSession* session, int request_id, const char* payload,
+        size_t payload_size, size_t chunk_size ) {
+
+	// chunking payload
+	int i;
+	for (i = 0; i < payload_size; i += chunk_size) {
+		osrfMessage* msg = osrf_message_init(RESULT, request_id, 1);
+		osrf_message_set_status_info(msg,
+			"osrfResultPartial",
+			"Partial Response",
+			OSRF_STATUS_PARTIAL
+		);
+
+		// see how long this chunk is.  If this is the last
+		// chunk, it will likely be less than chunk_size
+		int partial_size = strlen(&payload[i]);
+		if (partial_size > chunk_size)
+			partial_size = chunk_size;
+
+		// substr(data, i, partial_size)
+		char partial_buf[partial_size + 1];
+		memcpy(partial_buf, &payload[i], partial_size);
+		partial_buf[partial_size] = '\0';
+
+		// package the partial chunk as a JSON string object
+		jsonObject*  partial_obj = jsonNewObject(partial_buf);
+		osrf_message_set_result(msg, partial_obj);
+		jsonObjectFree(partial_obj);
+
+		// package the osrf message within an array then
+		// serialize to json for delivery
+		jsonObject* arr = jsonNewObject(NULL);
+
+		// msg json freed when arr is freed
+		jsonObjectPush(arr, osrfMessageToJSON(msg));
+		char* json = jsonObjectToJSON(arr);
+
+		osrfSendTransportPayload(session, json);
+		osrfMessageFree(msg);
+		jsonObjectFree(arr);
+		free(json);
+	}
+
+	// all chunks sent; send the final partial-complete msg
+	osrfMessage* msg = osrf_message_init(RESULT, request_id, 1);
+	osrf_message_set_status_info(msg,
+		"osrfResultPartialComplete",
+		"Partial Response Finalized",
+		OSRF_STATUS_NOCONTENT
+	);
+
+	jsonObject* arr = jsonNewObject(NULL);
+	jsonObjectPush(arr, osrfMessageToJSON(msg));
+	char* json = jsonObjectToJSON(arr);
+	osrfSendTransportPayload(session, json);
+	osrfMessageFree(msg);
+	jsonObjectFree(arr);
+	free(json);
+
+	return 0;
+}
+
+/**
 	@brief Wrap a given string in a transport message and send it.
 	@param session Pointer to the osrfAppSession responsible for sending the message(s).
 	@param payload A string to be sent via Jabber.
@@ -985,8 +1169,10 @@ int osrfSendTransportPayload( osrfAppSession* session, const char* payload ) {
 	message_set_osrf_xid( t_msg, osrfLogGetXid() );
 
 	int retval = client_send_message( session->transport_handle, t_msg );
-	if( retval )
-		osrfLogError( OSRF_LOG_MARK, "client_send_message failed" );
+	if( retval ) {
+		osrfLogError( OSRF_LOG_MARK, "client_send_message failed, exit()ing immediately" );
+		exit(99);
+	}
 
 	osrfLogInfo(OSRF_LOG_MARK, "[%s] sent %d bytes of data to %s",
 		session->remote_service, strlen( payload ), t_msg->recipient );
@@ -1082,6 +1268,9 @@ void osrfAppSessionFree( osrfAppSession* session ){
 	if(session->session_locale)
 		free(session->session_locale);
 
+	if(session->session_tz)
+		free(session->session_tz);
+
 	free(session->remote_id);
 	free(session->orig_remote_id);
 	free(session->session_id);
@@ -1174,20 +1363,40 @@ int osrfAppRequestRespondComplete(
 			OSRF_STATUS_COMPLETE );
 
 	if (data) {
-		osrfMessage* payload = osrf_message_init( RESULT, requestId, 1 );
-		osrf_message_set_status_info( payload, NULL, "OK", OSRF_STATUS_OK );
+		char* json = jsonObjectToJSON(data);
+		size_t raw_size = strlen(json);
+		size_t extra_size = osrfXmlEscapingLength(json);
+		size_t data_size = raw_size + extra_size;
+		size_t chunk_size = OSRF_MSG_CHUNK_SIZE;
 
-		char* json = jsonObjectToJSON( data );
-		osrf_message_set_result_content( payload, json );
+		if (data_size > chunk_size) // calculate an escape-scaled chunk size
+			chunk_size = ((double)raw_size / (double)data_size) * (double)chunk_size;
+
+		if (chunk_size > 0 && chunk_size < raw_size) {
+			// chunking -- response message exceeds max message size.
+			// break it up into chunks for partial delivery
+
+			osrfSendChunkedResult(ses, requestId, json, raw_size, chunk_size);
+			osrfAppSessionSendBatch( ses, &status, 1 );
+
+		} else {
+			// message doesn't need to be chunked
+			osrfMessage* payload = osrf_message_init( RESULT, requestId, 1 );
+			osrf_message_set_status_info( payload, NULL, "OK", OSRF_STATUS_OK );
+
+			osrf_message_set_result_content( payload, json );
+
+			osrfMessage* ms[2];
+			ms[0] = payload;
+			ms[1] = status;
+
+			osrfAppSessionSendBatch( ses, ms, 2 );
+
+			osrfMessageFree( payload );
+		}
+
 		free(json);
 
-		osrfMessage* ms[2];
-		ms[0] = payload;
-		ms[1] = status;
-
-		osrfAppSessionSendBatch( ses, ms, 2 );
-
-		osrfMessageFree( payload );
 	} else {
 		osrfAppSessionSendBatch( ses, &status, 1 );
 	}

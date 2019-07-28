@@ -36,6 +36,12 @@ typedef struct osrf_app_request_struct osrfAppRequest;
 #define OSRF_REQUEST_HASH_SIZE 64
 
 /**
+	@brief Default size of output buffer.
+*/
+#define OSRF_MSG_BUNDLE_SIZE 25600 /* 25K */
+#define OSRF_MSG_CHUNK_SIZE  (OSRF_MSG_BUNDLE_SIZE * 2)
+
+/**
 	@brief Representation of a session with another application.
 
 	An osrfAppSession is a list of lists.  It includes a list of osrfAppRequests
@@ -74,6 +80,9 @@ struct osrf_app_session_struct {
 	/** the current locale for this session. **/
 	char* session_locale;
 
+	/** the current TZ for this session. **/
+	char* session_tz;
+
 	/** let the user use the session to store their own session data. */
 	void* userData;
 
@@ -105,6 +114,13 @@ osrfAppSession* osrf_app_server_session_init(
 
 char* osrf_app_session_set_locale( osrfAppSession*, const char* );
 
+char* osrf_app_session_set_tz( osrfAppSession*, const char* );
+
+/* ingress used by all sessions until replaced */
+char* osrfAppSessionSetIngress( const char* );
+
+const char* osrfAppSessionGetIngress();
+
 osrfAppSession* osrf_app_session_find_session( const char* session_id );
 
 /* DEPRECATED; use osrfAppSessionSendRequest() instead. */
@@ -126,6 +142,10 @@ osrfMessage* osrfAppSessionRequestRecv(
 void osrf_app_session_request_finish( osrfAppSession* session, int request_id );
 
 int osrf_app_session_request_resend( osrfAppSession*, int request_id );
+
+int osrfSendChunkedResult(
+		osrfAppSession* session, int request_id, const char* payload,
+		size_t payload_size, size_t chunk_size );
 
 int osrfSendTransportPayload( osrfAppSession* session, const char* payload );
 
