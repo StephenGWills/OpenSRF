@@ -23,7 +23,7 @@ export APR_HEADERS              = @APR_HEADERS@
 export ETCDIR                   = @sysconfdir@
 export APXS2                    = @APXS2@
 export APACHE2_HEADERS          = @APACHE2_HEADERS@
-export DEF_CFLAGS               = -D_LARGEFILE64_SOURCE $(MAYBE_DEBUG) -pipe -g -Wall -O2 -fPIC -I@abs_top_srcdir@/include/ -I$(LIBXML2_HEADERS) -I$(APACHE2_HEADERS) -I$(APR_HEADERS) @INCLUDES@
+export DEF_CFLAGS               = -D_LARGEFILE64_SOURCE $(MAYBE_DEBUG) -pipe -g -Wall -O2 -fPIC -I@abs_top_srcdir@/include/ -I$(LIBXML2_HEADERS) -I$(APACHE2_HEADERS) -I$(APR_HEADERS) @AM_CPPFLAGS@
 export DEF_LDLIBS               = -lopensrf
 export VAR                      = @localstatedir@
 export PID                      = @localstatedir@/run/opensrf
@@ -34,6 +34,7 @@ export PERL_BASE                = @PERL_BASE@
 opensrfincludedir               = @includedir@/opensrf
 
 AM_CFLAGS = $(DEF_CFLAGS)
+ACLOCAL_AMFLAGS = -I m4
 
 DISTCLEANFILES = Makefile.in Makefile aclocal.m4 config.guess config.log config.sub config.status configure depcomp install-sh ltmain.sh missing
 
@@ -54,23 +55,13 @@ EXAMPLES_FILES = @srcdir@/examples/fieldmapper2cdbi.xsl \
 				 @srcdir@/examples/math_bench.pl \
 				 @srcdir@/examples/math_client.py \
 				 @srcdir@/examples/multisession-test.pl \
-				 @srcdir@/examples/srfsh_config.xsd \
-				 @srcdir@/examples/math_xul_client/math \
-				 @srcdir@/examples/math_xul_client/install.js
+				 @srcdir@/examples/srfsh_config.xsd
 
 strn_compat_FILES = @srcdir@/src/ports/strn_compat/strndup.c \
 					@srcdir@/src/ports/strn_compat/strndup.h \
 					@srcdir@/src/ports/strn_compat/strnlen.c \
 					@srcdir@/src/ports/strn_compat/strnlen.h
 
-python_FILES = @srcdir@/src/python/opensrf.py \
-			   @srcdir@/src/python/setup.py \
-			   @srcdir@/src/python/srfsh.py \
-			   @srcdir@/src/python/osrf
-
-java_FILES = @srcdir@/src/java/deps.inc \
-			 @srcdir@/src/java/deps.sh \
-			 @srcdir@/src/java/org
 
 libosrf_FILES = @srcdir@/src/libopensrf/basic_client.c \
 		@srcdir@/src/libopensrf/osrf_big_hash.c \
@@ -78,7 +69,7 @@ libosrf_FILES = @srcdir@/src/libopensrf/basic_client.c \
 		@srcdir@/src/libopensrf/osrfConfig.c
 
 
-EXTRA_DIST = $(DOC_FILES) $(EXAMPLES_FILES) $(libosrf_FILES) $(strn_compat_FILES) $(python_FILES) $(java_FILES) @srcdir@/autogen.sh @srcdir@/src/extras @srcdir@/COPYING @srcdir@/DCO-1.1.txt @srcdir@/LICENSE.txt @srcdir@/src/perl @srcdir@/src/javascript
+EXTRA_DIST = $(DOC_FILES) $(EXAMPLES_FILES) $(libosrf_FILES) $(strn_compat_FILES) $(java_FILES) @srcdir@/autogen.sh @srcdir@/src/extras @srcdir@/COPYING @srcdir@/DCO-1.1.txt @srcdir@/LICENSE.txt @srcdir@/src/perl @srcdir@/src/javascript
 
 OSRFINC=@srcdir@/include/opensrf
 

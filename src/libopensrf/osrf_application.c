@@ -746,6 +746,11 @@ static int _osrfAppRespond( osrfMethodContext* ctx, const jsonObject* data, int 
                 // chunking -- response message exceeds max message size.
                 // break it up into chunks for partial delivery
 
+                // but first, send out any any messages that may have
+                // been queued for bundling
+                if( flush_responses( ctx->session, ctx->session->outbuf ))
+                    return -1;
+
 				osrfSendChunkedResult(ctx->session, ctx->request,
 									  data_str, raw_size, chunk_size);
 
@@ -760,7 +765,9 @@ static int _osrfAppRespond( osrfMethodContext* ctx, const jsonObject* data, int 
                 osrf_message_set_result( msg, data );
 
                 // Serialize the OSRF message into JSON text
-                char* json = jsonObjectToJSON( osrfMessageToJSON( msg ));
+                jsonObject* msg_jsonobj = osrfMessageToJSON( msg );
+                char* json = jsonObjectToJSON( msg_jsonobj );
+                jsonObjectFree( msg_jsonobj );
                 osrfMessageFree( msg );
 
                 // If the new message would overflow the buffer, flush the output buffer first
@@ -785,7 +792,9 @@ static int _osrfAppRespond( osrfMethodContext* ctx, const jsonObject* data, int 
 				OSRF_STATUS_COMPLETE );
 
 			// Serialize the STATUS message into JSON text
-			char* json = jsonObjectToJSON( osrfMessageToJSON( status_msg ));
+			jsonObject* status_msg_jsonobj = osrfMessageToJSON( status_msg );
+			char* json = jsonObjectToJSON( status_msg_jsonobj );
+			jsonObjectFree( status_msg_jsonobj );
 			osrfMessageFree( status_msg );
 
 			// Add the STATUS message to the output buffer.

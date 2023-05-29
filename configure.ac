@@ -19,6 +19,11 @@
 # Initialization
 #-------------------------------
 
+libtoolize: Consider adding 'AC_CONFIG_MACRO_DIRS([m4])' to configure.ac,
+libtoolize: and rerunning libtoolize and aclocal.
+libtoolize: Consider adding '-I m4' to ACLOCAL_AMFLAGS in Makefile.am.
+
+
 export PATH=${PATH}:/usr/sbin
 AC_PREREQ(2.59)
 
@@ -26,11 +31,12 @@ AC_PREREQ(2.59)
 m4_include([version.m4])
 
 # Version number gets turned into @PACKAGE_VERSION@
-AC_INIT([OpenSRF],m4_defn([VERSION_NUMBER]),[open-ils-dev@list.georgialibraries.org])
-AM_INIT_AUTOMAKE([OpenSRF], m4_defn([VERSION_NUMBER]))
+AC_INIT([OpenSRF], [VERSION_NUMBER])
+AC_CONFIG_SRCDIR([configure.ac])
+AM_INIT_AUTOMAKE
+AC_CONFIG_MACRO_DIRS([m4])
 
 AC_REVISION($Revision: 0.1 $)
-AC_CONFIG_SRCDIR([configure.ac])
 
 # Enable $prefix to resolve to a reasonable value in substitutions in
 # scripts if no explict value was passed in to configure
@@ -38,7 +44,7 @@ if test "$prefix" == "NONE"; then
    prefix=$ac_default_prefix
 fi
 
-# Perl and Python scripts don't want ${prefix} if no value was specified
+# Perl scripts don't want ${prefix} if no value was specified
 eval "eval CONF_DIR=$sysconfdir"
 eval "eval PID_DIR=$localstatedir"
 AC_SUBST([CONF_DIR])
@@ -47,40 +53,9 @@ AC_SUBST([PID_DIR])
 AC_SUBST(prefix)
 AC_SUBST(bindir)
 
-
-AC_DEFUN([AC_PYTHON_MOD],[
-    if test -z $PYTHON;
-    then
-        PYTHON="python"
-    fi
-    AC_MSG_CHECKING($PYTHON_NAME module: $1)
-        $PYTHON -c "import $1" 2>/dev/null
-        if test $? -eq 0;
-        then
-                AC_MSG_RESULT(yes)
-                eval AS_TR_CPP(HAVE_PYMOD_$1)=yes
-        else
-                AC_MSG_ERROR(failed to find required module $1)
-		exit 1
-        fi
-])
-
 #-------------------------------
 # Installation options
 #-------------------------------
-
-# build and install the java libs?
-AC_ARG_ENABLE([java],
-[  --enable-java    enable building and installing the java libraries],
-[case "${enableval}" in
-    yes) OSRF_INSTALL_JAVA=true ;;
-    no) OSRF_INSTALL_JAVA=false ;; 
-  *) AC_MSG_ERROR([please choose another value for --enable-java (supported values are yes or no)]) ;;
-esac],
-[OSRF_INSTALL_JAVA=false])
-
-AM_CONDITIONAL([BUILDJAVA], [test x$OSRF_INSTALL_JAVA = xtrue])
-AC_SUBST([OSRF_INSTALL_JAVA])
 
 # install the javascript files?
 AC_ARG_ENABLE([javascript],
@@ -108,20 +83,6 @@ esac],
 AM_CONDITIONAL([BUILDCORE], [test x$OSRF_INSTALL_CORE = xtrue])
 AC_SUBST([OSRF_INSTALL_CORE])
 
-
-# build and install the python modules
-AC_ARG_ENABLE([python],
-[  --enable-python  enable building and installing python modules],
-[case "${enableval}" in
-  yes) OSRF_INSTALL_PYTHON=true ;;
-  no) OSRF_INSTALL_PYTHON=false ;;
-  *) AC_MSG_ERROR([please choose another value for --enable-python (supported values are yes or no)]) ;;
-esac],
-[OSRF_INSTALL_PYTHON=false])
-
-AM_CONDITIONAL([BUILDPYTHON], [test x$OSRF_INSTALL_PYTHON = xtrue])
-AC_SUBST([OSRF_INSTALL_PYTHON])
-
 # enable debug?
 
 AC_ARG_ENABLE(debug,
@@ -133,17 +94,12 @@ AC_ARG_ENABLE(debug,
 esac],[debug=false])
 AM_CONDITIONAL(DEBUG, test x$debug = xtrue)
  
-# path to the directory containing the java dependency jar files (included if java installs)
-if test $OSRF_INSTALL_JAVA; then
-	AC_SUBST([OSRF_JAVA_DEPSDIR], [deps])
-    AC_CONFIG_FILES([src/java/Makefile])
-fi
 
 #--------------------------------
 # Checks for programs.
 #--------------------------------
 
-AC_PROG_LIBTOOL
+LT_INIT
 AC_PROG_AWK
 AC_PROG_CC
 AC_PROG_INSTALL
@@ -267,12 +223,12 @@ IFS="${IFS}:"
 
 for dir in $EXTRA_USER_INCLUDES; do
 	if test -d "$dir"; then
-	  INCLUDES="$INCLUDES -I$dir"
+	  AM_CPPFLAGS="$AM_CPPFLAGS -I$dir"
 	else
 	  AC_MSG_WARN([*** Include directory $dir does not exist.])
 	fi
 done
-AC_SUBST(INCLUDES)
+AC_SUBST(AM_CPPFLAGS)
 
 for dir in $EXTRA_USER_LIBRARIES; do
 	if test -d "$dir"; then
@@ -288,19 +244,6 @@ IFS=${IFSBAK}
 AC_CONFIG_FILES([Makefile
 	src/Makefile])
 
-#PYTHON TESTS
-if test x$OSRF_INSTALL_PYTHON = xtrue; then
-    AC_CHECK_PROG([HAVE_PYTHON],python,yes,no)
-    if test $HAVE_PYTHON = "no"; then
-        AC_MSG_ERROR([*** python not found, aborting])
-    fi
-    AC_PYTHON_MOD([setuptools])
-    AC_CONFIG_FILES([
-        examples/math_client.py
-        examples/simple_text.py
-        src/python/Makefile
-    ])
-fi
 # Check Unit test framework
 PKG_CHECK_MODULES([CHECK], [check >= 0.9.0], [enable_tests=yes],
                   [enable_tests=no])
@@ -340,7 +283,6 @@ if test "x$OSRF_INSTALL_CORE" = "xtrue"; then
 	# Checks for header files.
 	#-----------------------------
 
-	AC_HEADER_STDC
 	AC_HEADER_SYS_WAIT
 	AC_CHECK_HEADERS([arpa/inet.h fcntl.h limits.h malloc.h netdb.h netinet/in.h stdlib.h string.h strings.h sys/socket.h sys/time.h sys/timeb.h syslog.h unistd.h])
 
@@ -352,7 +294,6 @@ if test "x$OSRF_INSTALL_CORE" = "xtrue"; then
 	AC_C_INLINE
 	AC_TYPE_PID_T
 	AC_TYPE_SIZE_T
-	AC_HEADER_TIME
 	AC_STRUCT_TM
     AM_PROG_CC_C_O
 
@@ -363,7 +304,6 @@ if test "x$OSRF_INSTALL_CORE" = "xtrue"; then
 	AC_FUNC_FORK
 	AC_FUNC_MALLOC
 	AC_FUNC_SELECT_ARGTYPES
-	AC_TYPE_SIGNAL
 	AC_FUNC_STRFTIME
 	AC_FUNC_STRTOD
 	AC_FUNC_VPRINTF
@@ -374,7 +314,6 @@ if test "x$OSRF_INSTALL_CORE" = "xtrue"; then
 	#------------------------------------
 
 	AC_CONFIG_FILES([doc/dokuwiki-doc-stubber.pl
-			 examples/math_xul_client/Makefile
 			 examples/math_bench.pl
 			 examples/multisession-test.pl
 			 src/c-apps/Makefile
@@ -384,11 +323,10 @@ if test "x$OSRF_INSTALL_CORE" = "xtrue"; then
 			 src/libopensrf/Makefile
 			 src/perl/Makefile
 			 src/ports/strn_compat/Makefile
-			 src/python/opensrf.py
 			 src/router/Makefile
 			 src/srfsh/Makefile
 			 src/websocket-stdio/Makefile
-             tests/Makefile
+			 tests/Makefile
 			 bin/opensrf-perl.pl
 			 bin/osrf_config])
 fi
@@ -397,19 +335,6 @@ AC_OUTPUT
 
 AC_MSG_RESULT([])
 AC_MSG_RESULT([--------------------- Configuration options:  -----------------------])
-
-if test "$OSRF_INSTALL_JAVA" = "true" ; then
-        AC_MSG_RESULT([OSRF install Java support?       yes])
-        AC_MSG_RESULT([Java support files               $OSRF_JAVA_DEPSDIR])
-else
-        AC_MSG_RESULT([OSRF install Java support?       no])
-fi
-
-if test "$OSRF_INSTALL_PYTHON" = "true" ; then
-        AC_MSG_RESULT([OSRF install Python support?     yes])
-else
-        AC_MSG_RESULT([OSRF install Python support?     no])
-fi
 
         AC_MSG_RESULT(Installation directory prefix:   ${prefix})
         AC_MSG_RESULT(Temporary directory:             ${TMP})
